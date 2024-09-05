@@ -1,0 +1,13 @@
+streamlit
+pandas
+plotly
+simple-salesforce
+python-dotenv
+pytz
+numpy
+matplotlib
+scikit-learn
+dspy
+toml
+black
+flake8
