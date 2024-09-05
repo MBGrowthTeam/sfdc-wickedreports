@@ -41,6 +41,12 @@ load_dotenv()
 # Load secrets from .streamlit/secrets.toml
 secrets = st.secrets
 
+# Colors
+primary_color = "#F63366"  # Streamlit's primary color
+background_color = "#FFFFFF"  # Main background color
+secondary_background_color = "#F0F2F6"  # Secondary background color
+text_color = "#262730"  # Text color
+
 # Salesforce credentials from secrets
 SF_USERNAME = secrets["salesforce"]["SF_USERNAME"]
 SF_PASSWORD = secrets["salesforce"]["SF_PASSWORD"]
@@ -1325,32 +1331,29 @@ def main():
                             go.Indicator(
                                 mode="gauge+number+delta",
                                 value=mql_count,
-                                number={"suffix": " MQLs", "font": {"color": "#F8F8F8"}},
+                                number={"suffix": " MQLs", "font": {"color": text_color}},  # Text color from config
                                 delta={
                                     "reference": target,
                                     "relative": True,
                                     "valueformat": ".1%",
-                                    "font": {"color": "#F8F8F8"},
+                                    "font": {"color": primary_color},  # Using primary color for the delta change
                                 },
                                 domain={"x": [0, 1], "y": [0, 1]},
                                 title={
                                     "text": f"MQLs This {period_name} vs Target ({target:.0f})",
-                                    "font": {"size": 24, "color": "#F8F8F8"},
+                                    "font": {"size": 24, "color": text_color},  # Text color for title
                                 },
                                 gauge={
-                                    "axis": {"range": [None, target * 1.5], "tickwidth": 1, "tickcolor": "#F8F8F8"},
-                                    "bar": {"color": "#4CAF50"},
-                                    "bgcolor": "rgba(255, 255, 255, 0.1)",
-                                    "borderwidth": 2,
-                                    "bordercolor": "#F8F8F8",
+                                    "axis": {"range": [None, target * 1.5], "tickwidth": 1, "tickcolor": text_color},
+                                    "bar": {"color": "rgba(0, 0, 0, 0)"},  # Transparent bar
                                     "steps": [
-                                        {"range": [0, target * 0.5], "color": "#FF5252"},
-                                        {"range": [target * 0.5, target * 0.75], "color": "#FFC107"},
-                                        {"range": [target * 0.75, target], "color": "#FFEB3B"},
-                                        {"range": [target, target * 1.5], "color": "#4CAF50"},
+                                        {"range": [0, target * 0.5], "color": "rgb(255, 85, 85)"},  # Red
+                                        {"range": [target * 0.5, target * 0.75], "color": "rgb(255, 195, 0)"},  # Yellow
+                                        {"range": [target * 0.75, target], "color": "rgb(255, 255, 85)"},  # Light yellow
+                                        {"range": [target, target * 1.5], "color": "rgb(75, 192, 192)"},  # Green
                                     ],
                                     "threshold": {
-                                        "line": {"color": "#F8F8F8", "width": 4},
+                                        "line": {"color": text_color, "width": 4},
                                         "thickness": 0.75,
                                         "value": target,
                                     },
@@ -1360,9 +1363,9 @@ def main():
 
                         fig.update_layout(
                             height=400,
-                            font={"color": "#F8F8F8", "family": "Arial"},
-                            paper_bgcolor="#0F1116",
-                            plot_bgcolor="#0F1116",
+                            font={"color": text_color, "family": "Arial"},
+                            paper_bgcolor=background_color,
+                            plot_bgcolor=background_color,
                         )
 
                         st.plotly_chart(fig)
