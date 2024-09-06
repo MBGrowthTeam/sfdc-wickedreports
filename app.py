@@ -10,6 +10,9 @@ st.set_page_config(layout="wide", page_title="Salesforce Data Dashboard")
 # Data Manipulation/Analysis
 import pandas as pd  # Pandas for data manipulation and analysis
 
+# Fuzzy Logic
+from fuzzywuzzy import process, fuzz
+
 # Data Visualization
 import plotly.express as px  # Plotly Express for quick, interactive plots
 import plotly.graph_objects as go  # Plotly Graph Objects for detailed, customizable visualizations
@@ -18,18 +21,23 @@ import plotly.graph_objects as go  # Plotly Graph Objects for detailed, customiz
 from simple_salesforce import Salesforce  # Simple Salesforce for interacting with Salesforce API
 
 # Date and Time Handling
-from datetime import datetime, timedelta  # DateTime and Timedelta for manipulating dates and times
+from datetime import datetime, timedelta, timezone  # DateTime and Timedelta for manipulating dates and times
 import pytz  # Pytz for timezone handling
+import json # Structured data
 
 # Environment Management
 from dotenv import load_dotenv  # Load environment variables from a .env file
 import os  # OS for interacting with the operating system, managing environment variables, file paths, etc.
+import time
 
 # Type Hinting and Annotations
 from typing import Optional, Any, Literal  # Typing for type annotations, enhancing code readability and static analysis
 
 # Concurrency
 import threading  # Threading for running concurrent operations
+
+# Type Hinting and Annotations
+from typing import Dict  # Typing for type annotations, enhancing code readability and static analysis
 
 # Specialized Libraries
 import dspy  # (Assumed to be a specialized data science or signal processing library)
@@ -69,6 +77,13 @@ SF_CONSUMER_SECRET = secrets["salesforce"]["SF_CONSUMER_SECRET"]
 # OpenAI API key from secrets
 OPENAI_API_KEY = secrets["openai"]["api_key"]
 
+# Load Salesforce object and field data
+with open('salesforce_object_data.json', 'r') as f:
+    salesforce_data = json.load(f)
+
+# Load the mapping from the JSON file
+with open('salesforce_object_mapping.json', 'r') as f:
+    object_aliases = json.load(f)
 
 def check_password():
     """Returns `True` if the user had a correct password."""
@@ -801,7 +816,6 @@ def apply_moving_average(series, window):
     """
     return series.rolling(window=window).mean()
 
-
 def calculate_target_and_mql_count(df, date_option, start_date, end_date):
     """
     Calculate the target MQL count and actual MQL count for the selected period.
@@ -1122,6 +1136,475 @@ def MQLDistributionByCampaignCard(df):
     campaign_distribution.columns = ["Campaign", "Count"]
     return px.bar(campaign_distribution, x="Campaign", y="Count", title="MQL Distribution by Campaign")
 
+def load_json_data(filepath):
+    """
+    Loads JSON data from the provided file path, handles nested structures if present.
+    """
+    try:
+        with open(filepath, 'r') as file:
+            data = json.load(file)
+        # Normalize the JSON structure if there are nested fields
+        df = pd.json_normalize(data)
+        return df
+    except Exception as e:
+        st.error(f"Error loading JSON data: {str(e)}")
+        return None
+    
+def validate_salesforce_object_and_fields(sf, object_name: str, fields: list):
+    """
+    Validate whether a Salesforce object and its fields exist in the Salesforce schema.
+
+    Args:
+        sf: Salesforce connection object.
+        object_name (str): The Salesforce object name to validate.
+        fields (list): A list of fields to validate within the object.
+
+    Returns:
+        dict: A dictionary containing validation results with potential corrections.
+    """
+    try:
+        # Fetch the object's metadata
+        object_metadata = sf.describe()
+
+        # Check if the object exists
+        if object_name not in [obj['name'] for obj in object_metadata['sobjects']]:
+            return {"status": "error", "message": f"Object '{object_name}' does not exist.", "suggestions": []}
+        
+        # Validate the fields within the object
+        field_metadata = sf.__getattr__(object_name).describe()
+        existing_fields = [f['name'] for f in field_metadata['fields']]
+        
+        invalid_fields = [field for field in fields if field not in existing_fields]
+        
+        if invalid_fields:
+            return {
+                "status": "error", 
+                "message": f"Fields {invalid_fields} not found in object '{object_name}'.", 
+                "suggestions": existing_fields[:5]  # Suggest first 5 fields
+            }
+        
+        return {"status": "success", "message": "Object and fields are valid."}
+    
+    except Exception as e:
+        return {"status": "error", "message": str(e), "suggestions": []}
+
+def generate_next_soql_with_openai(openai_model, salesforce_data, failed_query):
+    """
+    Generate the next SOQL query using OpenAI by considering the entire object tree context.
+
+    Args:
+        openai_model: OpenAI model object to generate the SOQL query.
+        salesforce_data: JSON data with available Salesforce objects and fields.
+        failed_query: The query that returned empty results.
+
+    Returns:
+        str: The new SOQL query generated by OpenAI, with unnecessary spacing removed.
+    """
+    # Extract available objects and fields from the JSON data
+    object_list = salesforce_data["object_list"]
+    object_tree = salesforce_data["object_tree"]
+    
+    # Refine the prompt for OpenAI to generate the next query, considering all relevant fields
+    prompt = f"""
+    You are an expert in Salesforce Object Query Language (SOQL).
+    The following objects are available: {object_list}.
+    Here is the complete field list for the 'Opportunity' object: {object_tree['Opportunity']}.
+    
+    The following SOQL query returned no results:
+    {failed_query}
+    
+    Using the above field list, generate a new SOQL query that can return results.
+    Use appropriate conditions and filters for the 'Opportunity' object. Only return the SOQL query.
+    """
+    
+    # Generate the new query using OpenAI
+    response = openai_model(prompt)
+    
+    if response:
+        # Clean up response: remove extra spaces and backticks, and ensure proper formatting
+        new_query = response[0].strip().replace("  ", " ").replace("`", "")
+        return new_query
+    else:
+        return None
+
+def run_soql_query_until_not_empty(sf, openai_model, query, salesforce_data, max_retries=5, retry_delay=5):
+    """
+    Runs a SOQL query and retries until a non-empty result is returned or a result is confirmed empty.
+
+    Args:
+        sf: Salesforce connection object.
+        openai_model: OpenAI model to generate new queries dynamically if needed.
+        query: The initial SOQL query string.
+        salesforce_data: Salesforce object schema for generating the next query if needed.
+        max_retries: Maximum number of retries if a temporary issue occurs (default: 5).
+        retry_delay: Time (in seconds) to wait between retries (default: 5 seconds).
+
+    Returns:
+        A Pandas DataFrame containing the query result or an error message after retries.
+    """
+    for retry_count in range(max_retries):
+        try:
+            # Run the SOQL query
+            result = sf.query_all(query)
+            result_df = pd.DataFrame(result["records"]).drop(columns=["attributes"], errors="ignore")
+            
+            # If results are found, return immediately
+            if not result_df.empty:
+                return result_df
+
+            st.warning(f"Query returned empty result. Retrying... ({retry_count+1}/{max_retries})")
+
+        except Exception as e:
+            st.error(f"Error executing query: {e}")
+            return None
+
+        # If empty result, try generating a new query dynamically using OpenAI
+        st.info("Retrying with a new query...")
+        query = generate_next_soql_with_openai(openai_model, salesforce_data, query)
+
+        # Wait for the retry delay before running again
+        time.sleep(retry_delay)
+
+    st.warning("No data returned after maximum retries and refinement.")
+    return None
+
+def generate_soql_query_with_validation(sf, salesforce_data: Dict, object_aliases: Dict, requirement: str) -> str:
+    """
+    Generates a SOQL query using OpenAI based on the Salesforce data and user-provided requirement, with validation.
+    
+    Args:
+        sf: Salesforce connection object.
+        salesforce_data (Dict): The Salesforce object and field data.
+        object_aliases (Dict): Mapping of common terms to Salesforce objects.
+        requirement (str): The user's requirement for the query.
+        
+    Returns:
+        str: The generated SOQL query, or an error message if validation fails.
+    """
+
+    # Load the object list and tree from the Salesforce data schema
+    object_list = salesforce_data["object_list"]
+    object_tree = salesforce_data["object_tree"]
+
+    # Step 1: Dynamically determine object based on user input or mapped terms
+    possible_objects = [obj for obj in object_list if obj.lower() in requirement.lower()]
+
+    # Step 2: If no exact match, try to use object alias mapping from the JSON file
+    if not possible_objects:
+        for mapping in object_aliases["object_aliases"]:
+            if mapping["term"].lower() in requirement.lower():
+                possible_objects.append(mapping["salesforce_object"])
+
+    # Step 3: If still no match, apply fuzzy matching to find the closest Salesforce object
+    if not possible_objects:
+        closest_match, score = process.extractOne(requirement, object_list, scorer=fuzz.token_sort_ratio)
+        
+        # Set a similarity threshold (e.g., 70%)
+        if score >= 70:
+            possible_objects.append(closest_match)
+        else:
+            # Suggest similar objects if no close match is found
+            return f"Error: No matching object found for the requirement. Did you mean '{closest_match}'?"
+
+    if not possible_objects:
+        return "Error: No matching object found for the requirement."
+
+    # Step 4: Select the first matched object and retrieve fields
+    object_name = possible_objects[0]
+    object_fields = object_tree.get(object_name, [])
+    
+    if not object_fields:
+        return f"Error: No fields found for object '{object_name}' in Salesforce data."
+
+    # Step 5: Determine relevant fields mentioned in the requirement, or default to the first few fields
+    relevant_fields = [field for field in object_fields if field.lower() in requirement.lower()]
+
+    if not relevant_fields:
+        relevant_fields = object_fields[:3]  # Default to the first 3 fields if none are mentioned
+
+    # Step 6: Validate the object and fields
+    validation_result = validate_salesforce_object_and_fields(sf, object_name, relevant_fields)
+    if validation_result["status"] == "error":
+        return f"Validation Error: {validation_result['message']}. Suggestions: {validation_result['suggestions']}"
+
+    # Step 7: Construct the refined OpenAI prompt to generate a valid SOQL query
+    prompt = f"""
+    You are an expert at writing SOQL (Salesforce Object Query Language) queries for Salesforce.
+
+    The available objects are: {', '.join(object_list)}
+
+    The '{object_name}' object has the following example fields: {', '.join(object_fields)}
+
+    Generate **only** a valid SOQL query that meets the following requirement: "{requirement}".
+
+    Important considerations:
+    1. Avoid unsupported SOQL functions like YEAR(), GROUP BY, or HAVING.
+    2. Apply date filters like `CreatedDate >= 2024-01-01T00:00:00Z`.
+    3. Do not include any explanations or keywords like 'sql'. Return only the query.
+    4. Ensure the SOQL query only includes fields and objects from the validated Salesforce schema.
+    """
+
+    # Step 8: Call OpenAI to generate the SOQL query
+    response = openai_model(prompt)
+
+    # Ensure the response contains only SOQL code
+    if response and isinstance(response, list) and response[0]:
+        soql_query = response[0].strip()
+    else:
+        return "Error: No response from OpenAI."
+
+    # Step 9: Clean up any markdown formatting or extraneous text from OpenAI output
+    if "```" in soql_query:
+        soql_query = soql_query.split("```")[1].strip()  # Extract only the query
+
+    soql_query = soql_query.replace("sql", "").strip()  # Ensure no unexpected words appear
+
+    return soql_query
+
+def parse_relative_time(requirement: str):
+    """
+    Parse the user's request and determine the appropriate time range based on relative time phrases.
+    
+    Args:
+        requirement (str): The user's requirement/query string.
+        
+    Returns:
+        tuple: start_date (datetime), end_date (datetime), or None if no valid time period is found.
+    """
+    today = datetime.utcnow()
+    
+    if "last week" in requirement.lower():
+        start_of_week = today - timedelta(days=today.weekday(), weeks=1)  # Previous Monday
+        end_of_week = start_of_week + timedelta(days=6)  # End of previous Sunday
+        return start_of_week, end_of_week
+    
+    elif "this month" in requirement.lower():
+        start_of_month = today.replace(day=1)  # First day of the current month
+        end_of_month = today  # Today is the end of the current period (to now)
+        return start_of_month, end_of_month
+    
+    elif "last month" in requirement.lower():
+        first_day_this_month = today.replace(day=1)
+        last_month_end = first_day_this_month - timedelta(days=1)  # Last day of the previous month
+        last_month_start = last_month_end.replace(day=1)  # First day of the previous month
+        return last_month_start, last_month_end
+    
+    elif "this year" in requirement.lower():
+        start_of_year = today.replace(month=1, day=1)  # First day of the current year
+        end_of_year = today  # Today is the end of the current period (to now)
+        return start_of_year, end_of_year
+    
+    elif "last year" in requirement.lower():
+        start_of_last_year = today.replace(year=today.year - 1, month=1, day=1)  # First day of last year
+        end_of_last_year = start_of_last_year.replace(month=12, day=31)  # Last day of last year
+        return start_of_last_year, end_of_last_year
+
+    return None, None
+
+def identify_salesforce_objects(query: str, salesforce_data: Dict, object_aliases: Dict) -> list:
+    possible_objects = []
+    for alias in object_aliases['object_aliases']:
+        if alias['term'].lower() in query.lower():
+            possible_objects.append(alias['salesforce_object'])
+    return possible_objects
+
+def infer_relevant_fields(query: str, available_fields: list) -> list:
+    # This can be enhanced to check for specific keywords in the query and map to relevant fields
+    if "name" in query.lower():
+        return [field for field in available_fields if "Name" in field]
+    if "amount" in query.lower() or "revenue" in query.lower():
+        return [field for field in available_fields if "Amount" in field or "Revenue" in field]
+    return available_fields[:5]  # Default to the first 5 fields
+
+def generate_soql_query_with_dynamic_dates(user_query: str, salesforce_data: Dict, object_aliases: Dict) -> str:
+    """
+    Generate a SOQL query based on the user's natural language query, dynamically handling date-based and non-date-based questions.
+
+    Args:
+        user_query (str): The user's query in natural language.
+        salesforce_data (Dict): Salesforce object and field data.
+        object_aliases (Dict): Mapping for object aliases in the Salesforce schema.
+
+    Returns:
+        str: The generated SOQL query or an error message if validation fails.
+    """
+    # 1. Identify the main object(s) from the user query (e.g., "Account", "Opportunity")
+    matched_objects = identify_salesforce_objects(user_query, salesforce_data, object_aliases)
+    
+    if not matched_objects:
+        return "Error: No matching Salesforce object found for your query."
+    
+    # 2. Analyze the user query for context
+    date_range = parse_relative_time(user_query)  # Attempt to infer date range if it exists
+    start_date, end_date = date_range
+    
+    # 3. Select appropriate fields for the SOQL query based on the matched object
+    selected_object = matched_objects[0]  # Assuming we are working with the first matched object
+    available_fields = salesforce_data['object_tree'].get(selected_object, [])
+    
+    if not available_fields:
+        return f"Error: No fields available for the object '{selected_object}'."
+    
+    # Dynamically select the fields based on the query context or default to a few fields
+    relevant_fields = infer_relevant_fields(user_query, available_fields)
+    field_str = ', '.join(relevant_fields)
+    
+    # 4. Generate the SOQL query dynamically
+    soql_query = f"SELECT {field_str} FROM {selected_object}"
+    
+    # 5. Add time-based filters if a valid date range is inferred
+    if start_date and end_date:
+        start_date_str = start_date.strftime('%Y-%m-%dT00:00:00Z')
+        end_date_str = end_date.strftime('%Y-%m-%dT23:59:59Z')
+        soql_query += f" WHERE CreatedDate >= {start_date_str} AND CreatedDate <= {end_date_str}"
+    
+    # If no dates are detected, proceed without the WHERE clause
+    return soql_query.strip().replace("  ", " ")  # Clean up extra spaces
+
+def validate_required_columns(sf, object_name: str, required_fields: list):
+    """
+    Validate whether the required columns exist in the Salesforce object schema.
+    
+    Args:
+        sf: Salesforce connection object.
+        object_name (str): The Salesforce object name.
+        required_fields (list): A list of required fields for validation.
+
+    Returns:
+        tuple: A tuple containing the valid fields and the missing fields.
+    """
+    try:
+        # Describe the Salesforce object to get its metadata
+        object_metadata = sf.__getattr__(object_name).describe()
+        existing_fields = [f['name'] for f in object_metadata['fields']]
+
+        # Check for missing fields
+        missing_fields = [field for field in required_fields if field not in existing_fields]
+        valid_fields = [field for field in required_fields if field in existing_fields]
+
+        return valid_fields, missing_fields
+    except Exception as e:
+        logging.error(f"Error while validating columns for object {object_name}: {str(e)}")
+        return [], required_fields
+
+def generate_soql_query(object_name: str, required_fields: list, sf):
+    """
+    Generate a SOQL query based on available columns for a given object.
+
+    Args:
+        object_name (str): The name of the Salesforce object.
+        required_fields (list): The list of fields required for the query.
+        sf: Salesforce connection object.
+
+    Returns:
+        str: The generated SOQL query or an error message.
+    """
+    # Validate the fields
+    valid_fields, missing_fields = validate_required_columns(sf, object_name, required_fields)
+
+    if missing_fields:
+        st.warning(f"The following required columns are missing: {missing_fields}")
+
+    # If no valid fields are found, return an error
+    if not valid_fields:
+        return f"Error: No valid fields found for object '{object_name}'."
+
+    # Generate the SOQL query string dynamically based on available fields
+    fields_str = ', '.join(valid_fields)
+    query = f"SELECT {fields_str} FROM {object_name}"
+
+    return query
+
+def fetch_salesforce_data_with_validation(sf, object_name, required_fields):
+    """
+    Fetch Salesforce data, validating the existence of required columns.
+
+    Args:
+        sf: Salesforce connection object.
+        object_name (str): The Salesforce object to query.
+        required_fields (list): A list of required columns for the query.
+
+    Returns:
+        pd.DataFrame: The fetched data as a Pandas DataFrame or an error message.
+    """
+    # Generate the SOQL query with dynamic field checking
+    soql_query = generate_soql_query(object_name, required_fields, sf)
+    
+    if soql_query.startswith("Error"):
+        return None, soql_query
+
+    # Fetch data from Salesforce
+    try:
+        result = sf.query_all(soql_query)
+        data_df = pd.DataFrame(result["records"]).drop(columns=["attributes"], errors="ignore")
+        return data_df, None
+    except Exception as e:
+        error_message = f"Error fetching data: {str(e)}"
+        logging.error(error_message)
+        return None, error_message
+
+def fetch_open_opportunities_data(sf, start_date, end_date):
+    """
+    Fetch open opportunities data from Salesforce within a specified date range.
+
+    Args:
+        sf: Salesforce connection object.
+        start_date: Start date for the data range.
+        end_date: End date for the data range.
+
+    Returns:
+        pd.DataFrame: A Pandas DataFrame containing the fetched open opportunities data.
+    """
+    start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
+    end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+
+    # Corrected SOQL Query 
+    query = f"""
+    SELECT Id, Name, Amount, StageName, CloseDate, LeadSource, CreatedDate
+    FROM Opportunity
+    WHERE IsClosed = FALSE 
+    AND CreatedDate >= {start_date_str}
+    AND CreatedDate <= {end_date_str}
+    """
+    result = sf.query_all(query)
+    df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
+    return df
+
+def process_open_opportunities_data(df):
+    """
+    Process the open opportunities data.
+
+    Args:
+        df (pd.DataFrame): The raw open opportunities data.
+
+    Returns:
+        pd.DataFrame: Processed open opportunities data.
+    """
+    df["CreatedDate"] = pd.to_datetime(df["CreatedDate"]).dt.tz_localize(None)
+    df["CloseDate"] = pd.to_datetime(df["CloseDate"]).dt.tz_localize(None)
+    df["DaysOpen"] = (datetime.now(timezone.utc).replace(tzinfo=None) - df["CreatedDate"]).dt.days
+    return df
+
+def OpenOpportunitiesByStageCard(df):
+    """
+    Visualize open opportunities by stage.
+
+    Args:
+        df (pd.DataFrame): The processed open opportunities data.
+
+    Returns:
+        plotly.graph_objects.Figure: The bar chart figure.
+    """
+    stage_data = df["StageName"].value_counts().reset_index()
+    stage_data.columns = ["Stage", "Count"]
+    return px.bar(stage_data, x="Stage", y="Count", title="Open Opportunities by Stage")
+
+def OpenOpportunitiesTrendCard(df):
+    """Visualize open opportunities trend over time."""
+    df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
+    trend_data = df.groupby(df["CreatedDate"].dt.date).size().reset_index(name="Count")
+    return px.line(trend_data, x="CreatedDate", y="Count", title="Open Opportunities Trend")
+
 def main():
     """
     Main function to run the Streamlit application.
@@ -1135,184 +1618,277 @@ def main():
             vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
 
             st.markdown("### Select Report")
-            report_type = st.radio("Choose Report Type", ("Orders", "Lead Source Pipeline (MQLs)"))
+            report_type = st.radio("Choose Report Type", ("Orders", "Lead Source Pipeline (MQLs)", "Open Opportunities", "SQL Bench"))
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
 
-        # Date range selection
-        col1, col2 = st.columns(2)
-        with col1:
-            date_option = st.selectbox(
-                "Select Date Range",
-                (
-                    "Month to Date (Current Month)",
-                    "Last 7 days",
-                    "Last Month",
-                    "Last 3 months",
-                    "Last 6 months",
-                    "Last 12 months",
-                    "Year to Date",
-                    "Custom",
-                ),
-            )
+        if report_type == "SQL Bench":
+            st.markdown("### SQL Bench")
+            user_question = st.text_area("Ask a question to generate a SOQL query:", value=st.session_state.get("last_question", ""))
 
-            if date_option == "Custom":
-                start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=90))
-                end_date = st.date_input("End Date", value=datetime.now())
-            elif date_option == "Year to Date":
-                start_date = datetime(datetime.now().year, 1, 1)
-                end_date = datetime.now()
-            elif date_option == "Month to Date (Current Month)":
-                start_date = datetime.now().replace(day=1)
-                end_date = datetime.now()
-            elif date_option == "Last Month":
-                today = datetime.now()
-                last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-                last_month_end = today.replace(day=1) - timedelta(days=1)
-                start_date = last_month_start
-                end_date = last_month_end
-            else:
-                end_date = datetime.now()
-                start_date_map = {"Last 7 days": 7, "Last 3 months": 90, "Last 6 months": 180, "Last 12 months": 365}
-                start_date = end_date - timedelta(days=start_date_map[date_option])
+            if st.button("Generate Query"):
+                if user_question:
+                    with st.spinner("Generating SOQL query..."):
+                        sf = connect_to_salesforce()
+                        if sf:
+                            # Generate the SOQL query based on the user's question
+                            soql_query = generate_soql_query_with_dynamic_dates(user_question, salesforce_data, object_aliases)
+                            st.session_state.generated_query = soql_query  # Save to session state
+                            st.session_state.last_question = user_question  # Track last question
+                        else:
+                            st.error("Salesforce connection failed.")
+                else:
+                    st.warning("Please enter a question.")
 
-        # Fetch and display data on button click
-        if st.button("Fetch Data"):
-            with st.spinner("Fetching data from Salesforce..."):
-                sf = connect_to_salesforce()
-                if not sf:
-                    return
+            # Prepopulate the text area with the generated query
+            sql_input = st.text_area("Enter your SOQL query here:", value=st.session_state.get("generated_query", ""))
+            
+            if st.button("Run Query"):
+                if sql_input:
+                    with st.spinner("Running query..."):
+                        sf = connect_to_salesforce()  # Connect to Salesforce
 
-                # Handle Orders report
-                if report_type == "Orders":
-                    df = fetch_salesforce_data(sf, start_date, end_date)
-                    wicked_reports_df = fetch_wicked_reports_data(sf, start_date, end_date)
+                        if sf:
+                            try:
+                                # Run query with retry mechanism and OpenAI refinement
+                                df = run_soql_query_until_not_empty(sf, openai_model, sql_input, salesforce_data)
 
-                    if df.empty:
-                        st.warning("No data found for the selected date range.")
-                    else:
-                        processed_df = process_data(df)
-                        processed_df = calculate_cltv(processed_df)
-                        product_adoption = calculate_product_adoption(processed_df)
+                                # Handle the case where the result is None (error occurred) or empty (no data)
+                                if df is not None:
+                                    if not df.empty:
+                                        st.dataframe(df)  # Display the DataFrame in the app
 
-                        # Display key metrics and visualizations
-                        if not product_adoption.empty:
+                                        # CSV download button for query results
+                                        query_results_csv = df.to_csv(index=False)
+                                        st.download_button(
+                                            label="Download Query Results CSV",
+                                            data=query_results_csv,
+                                            file_name="query_results.csv",
+                                            mime="text/csv",
+                                        )
+                                    else:
+                                        st.warning("The query returned no data.")
+                                else:
+                                    st.error("An error occurred during the query execution.")
+
+                            except Exception as e:
+                                st.error(f"Error executing query: {e}")
+                        else:
+                            st.error("Not connected to Salesforce.")
+                else:
+                    st.warning("Please enter a SOQL query.")
+
+        else:
+            # Display date range selection and "Fetch Data" button for Orders and MQL reports
+            col1, col2 = st.columns(2)
+            with col1:
+                date_option = st.selectbox(
+                    "Select Date Range",
+                    (
+                        "Month to Date (Current Month)",
+                        "Last 7 days",
+                        "Last Month",
+                        "Last 3 months",
+                        "Last 6 months",
+                        "Last 12 months",
+                        "Year to Date",
+                        "Custom",
+                    ),
+                )
+
+                if date_option == "Custom":
+                    start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=90))
+                    end_date = st.date_input("End Date", value=datetime.now())
+                elif date_option == "Year to Date":
+                    start_date = datetime(datetime.now().year, 1, 1)
+                    end_date = datetime.now()
+                elif date_option == "Month to Date (Current Month)":
+                    start_date = datetime.now().replace(day=1)
+                    end_date = datetime.now()
+                elif date_option == "Last Month":
+                    today = datetime.now()
+                    last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+                    last_month_end = today.replace(day=1) - timedelta(days=1)
+                    start_date = last_month_start
+                    end_date = last_month_end
+                else:
+                    end_date = datetime.now()
+                    start_date_map = {"Last 7 days": 7, "Last 3 months": 90, "Last 6 months": 180, "Last 12 months": 365}
+                    start_date = end_date - timedelta(days=start_date_map[date_option])
+
+            # Fetch and display data on button click
+            if st.button("Fetch Data"):
+                with st.spinner("Fetching data from Salesforce..."):
+                    sf = connect_to_salesforce()
+                    if not sf:
+                        return
+
+                    # Handle Orders report
+                    if report_type == "Orders":
+                        df = fetch_salesforce_data(sf, start_date, end_date)
+                        wicked_reports_df = fetch_wicked_reports_data(sf, start_date, end_date)
+
+                        if df.empty:
+                            st.warning("No data found for the selected date range.")
+                        else:
+                            processed_df = process_data(df)
+                            processed_df = calculate_cltv(processed_df)
+                            product_adoption = calculate_product_adoption(processed_df)
+
+                            # Display key metrics and visualizations
+                            if not product_adoption.empty:
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Total Orders", len(processed_df))
+                                with col2:
+                                    if "ORDERTOTAL" in processed_df.columns:
+                                        total_revenue = processed_df["ORDERTOTAL"].sum()
+                                        st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                                    else:
+                                        st.metric("Total Revenue", "N/A")
+                                with col3:
+                                    if "ORDERTOTAL" in processed_df.columns:
+                                        avg_order_value = processed_df["ORDERTOTAL"].mean()
+                                        st.metric("Average Order Value", f"${avg_order_value:,.2f}")
+                                    else:
+                                        st.metric("Average Order Value", "N/A")
+
+                                # Orders by State visualization
+                                state_counts = processed_df["CUSTOMERSTATE"].value_counts().reset_index()
+                                state_counts.columns = ["State", "Order Count"]
+                                st.plotly_chart(
+                                    px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
+                                    use_container_width=True,
+                                )
+
+                                # Orders by Product Category (Pie Chart)
+                                category_counts = processed_df["Product_Category__c"].value_counts().reset_index()
+                                category_counts.columns = ["Product Category", "Order Count"]
+                                st.plotly_chart(
+                                    px.pie(
+                                        category_counts,
+                                        values="Order Count",
+                                        names="Product Category",
+                                        title="Orders by Product Category (Amplify)",
+                                    ),
+                                    use_container_width=True,
+                                )
+
+                                # Display product adoption and other visualizations
+                                st.plotly_chart(
+                                    px.line(
+                                        product_adoption,
+                                        x="OrderMonth",
+                                        y="AdoptionRate",
+                                        color="PRODUCTNAME",
+                                        title="Amplify Product Adoption Rates Over Time",
+                                    ).update_layout(legend_title_text="Amplify Products"),
+                                    use_container_width=True,
+                                )
+
+                                # Display data table
+                                st.subheader("Salesforce Data Table")
+                                st.dataframe(processed_df)
+
+                                # CSV download buttons
+                                complete_csv = processed_df.to_csv(index=False)
+                                st.download_button(
+                                    label="Download Complete CSV",
+                                    data=complete_csv,
+                                    file_name="salesforce_export.csv",
+                                    mime="text/csv",
+                                )
+
+                                if not wicked_reports_df.empty:
+                                    wicked_df = prepare_wicked_reports_export(wicked_reports_df)
+                                    st.subheader("Wicked Reports Data Table")
+                                    st.dataframe(wicked_df)
+                                    wicked_csv = wicked_df.to_csv(index=False)
+                                    st.download_button(
+                                        label="Download Wicked Reports CSV",
+                                        data=wicked_csv,
+                                        file_name="wicked_reports_export.csv",
+                                        mime="text/csv",
+                                    )
+                                else:
+                                    st.warning("No data available for Wicked Reports export.")
+
+                    # Handle Lead Source Pipeline (MQLs) report
+                    if report_type == "Lead Source Pipeline (MQLs)":
+                        df = fetch_mql_data(sf, start_date, end_date)
+                        campaign_df = fetch_campaign_data(sf, start_date, end_date)
+
+                        if vertical == "Protestant (Default)":
+                            df = df[df["Product_Interest__c"] == "Amplify"]
+
+                        if df.empty:
+                            st.warning("No MQL data found for the selected date range.")
+                        else:
+                            df = process_mql_data(df)
+                            st.subheader("MQL Dashboard")
+
+                            # Display MQL metrics and charts
+                            total_mqls = len(df)
+                            avg_lead_age = df["LeadAge"].mean()
+
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                st.metric("Total Orders", len(processed_df))
+                                st.metric("How many MQLs did we generate?", total_mqls)
                             with col2:
-                                if "ORDERTOTAL" in processed_df.columns:
-                                    total_revenue = processed_df["ORDERTOTAL"].sum()
-                                    st.metric("Total Revenue", f"${total_revenue:,.2f}")
-                                else:
-                                    st.metric("Total Revenue", "N/A")
+                                st.metric("What's the average new lead to MQL age?", f"{avg_lead_age:.1f} days")
                             with col3:
-                                if "ORDERTOTAL" in processed_df.columns:
-                                    avg_order_value = processed_df["ORDERTOTAL"].mean()
-                                    st.metric("Average Order Value", f"${avg_order_value:,.2f}")
-                                else:
-                                    st.metric("Average Order Value", "N/A")
+                                target, mql_count, period_name = calculate_target_and_mql_count(df, date_option, start_date, end_date)
+                                st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
 
-                            # Orders by State visualization
-                            state_counts = processed_df["CUSTOMERSTATE"].value_counts().reset_index()
-                            state_counts.columns = ["State", "Order Count"]
-                            st.plotly_chart(
-                                px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
-                                use_container_width=True,
-                            )
+                            # Display MQL conversions, lead source performance, and MQL trend over time
+                            st.plotly_chart(LeadSourcePerformanceCard(df))
+                            st.plotly_chart(MQLTrendOverTimeCard(df))
 
-                            # Orders by Product Category (Pie Chart)
-                            category_counts = processed_df["Product_Category__c"].value_counts().reset_index()
-                            category_counts.columns = ["Product Category", "Order Count"]
-                            st.plotly_chart(
-                                px.pie(
-                                    category_counts,
-                                    values="Order Count",
-                                    names="Product Category",
-                                    title="Orders by Product Category (Amplify)",
-                                ),
-                                use_container_width=True,
-                            )
-
-                            # Display product adoption and other visualizations
-                            st.plotly_chart(
-                                px.line(
-                                    product_adoption,
-                                    x="OrderMonth",
-                                    y="AdoptionRate",
-                                    color="PRODUCTNAME",
-                                    title="Amplify Product Adoption Rates Over Time",
-                                ).update_layout(legend_title_text="Amplify Products"),
-                                use_container_width=True,
-                            )
-
-                            # Display data table
-                            st.subheader("Salesforce Data Table")
-                            st.dataframe(processed_df)
-
-                            # CSV download buttons
-                            complete_csv = processed_df.to_csv(index=False)
+                            st.subheader("MQL Data Table")
+                            st.dataframe(df)
                             st.download_button(
-                                label="Download Complete CSV",
-                                data=complete_csv,
-                                file_name="salesforce_export.csv",
+                                label="Download MQL CSV",
+                                data=df.to_csv(index=False),
+                                file_name="mql_export.csv",
                                 mime="text/csv",
                             )
 
-                            if not wicked_reports_df.empty:
-                                wicked_df = prepare_wicked_reports_export(wicked_reports_df)
-                                st.subheader("Wicked Reports Data Table")
-                                st.dataframe(wicked_df)
-                                wicked_csv = wicked_df.to_csv(index=False)
-                                st.download_button(
-                                    label="Download Wicked Reports CSV",
-                                    data=wicked_csv,
-                                    file_name="wicked_reports_export.csv",
-                                    mime="text/csv",
-                                )
-                            else:
-                                st.warning("No data available for Wicked Reports export.")
+                    # Handle Open Opportunities report
+                    elif report_type == "Open Opportunities":
+                        df = fetch_open_opportunities_data(sf, start_date, end_date)
 
-                # Handle Lead Source Pipeline (MQLs) report
-                if report_type == "Lead Source Pipeline (MQLs)":
-                    df = fetch_mql_data(sf, start_date, end_date)
-                    campaign_df = fetch_campaign_data(sf, start_date, end_date)
+                        if df.empty:
+                            st.warning("No open opportunities found for the selected date range.")
+                        else:
+                            df = process_open_opportunities_data(df)
+                            st.subheader("Open Opportunities Dashboard")
 
-                    if vertical == "Protestant (Default)":
-                        df = df[df["Product_Interest__c"] == "Amplify"]
+                            # Display Open Opportunities metrics and charts
+                            total_open_opps = len(df)
+                            avg_days_open = df["DaysOpen"].mean()
+                            total_value = df["Amount"].sum()
 
-                    if df.empty:
-                        st.warning("No MQL data found for the selected date range.")
-                    else:
-                        df = process_mql_data(df)
-                        st.subheader("MQL Dashboard")
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Open Opportunities", total_open_opps)
+                            with col2:
+                                st.metric("Average Days Open", f"{avg_days_open:.1f} days")
+                            with col3:
+                                st.metric("Total Opportunity Value", f"${total_value:,.2f}")
 
-                        # Display MQL metrics and charts
-                        total_mqls = len(df)
-                        avg_lead_age = df["LeadAge"].mean()
+                            # Display Open Opportunities charts
+                            st.plotly_chart(OpenOpportunitiesByStageCard(df))
+                            st.plotly_chart(OpenOpportunitiesTrendCard(df))
 
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("How many MQLs did we generate?", total_mqls)
-                        with col2:
-                            st.metric("What's the average new lead to MQL age?", f"{avg_lead_age:.1f} days")
-                        with col3:
-                            target, mql_count, period_name = calculate_target_and_mql_count(df, date_option, start_date, end_date)
-                            st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
-
-                        # Display MQL conversions, lead source performance, and MQL trend over time
-                        st.plotly_chart(LeadSourcePerformanceCard(df))
-                        st.plotly_chart(MQLTrendOverTimeCard(df))
-
-                        st.subheader("MQL Data Table")
-                        st.dataframe(df)
-                        st.download_button(
-                            label="Download MQL CSV",
-                            data=df.to_csv(index=False),
-                            file_name="mql_export.csv",
-                            mime="text/csv",
-                        )
+                            st.subheader("Open Opportunities Data Table")
+                            st.dataframe(df)
+                            st.download_button(
+                                label="Download Open Opportunities CSV",
+                                data=df.to_csv(index=False),
+                                file_name="open_opportunities_export.csv",
+                                mime="text/csv",
+                            )
 
 if __name__ == "__main__":
     main()

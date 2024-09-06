@@ -13,3 +13,5 @@ black
 flake8
 passlib
 bcrypt
+fuzzywuzzy
+python-Levenshtein
