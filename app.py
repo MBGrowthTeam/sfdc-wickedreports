@@ -968,7 +968,7 @@ def create_velocity_funnel(velocity_data):
     return fig
 
 
-# Helper Function to Display MQL Cards
+# MQL Card Functions
 def display_mql_card(df, field, chart_function, metric_label="Count"):
     """
     Displays a card with headline stats and a visualization.
@@ -990,8 +990,36 @@ def display_mql_card(df, field, chart_function, metric_label="Count"):
         st.metric(f"Average {metric_label}", data[metric_label].mean())
     st.plotly_chart(chart_function(df), use_container_width=True)
 
+def MQLFunnelCard(df):
+    """
+    Creates a funnel chart visualizing the MQL conversion stages.
 
-# MQL Card Functions
+    Args:
+        df (pd.DataFrame): The DataFrame containing MQL data.
+
+    Returns:
+        plotly.graph_objects.Figure: The funnel chart figure.
+    """
+    stages = ["MQL Created", "Contacted", "Qualified", "Demo Scheduled", "Opportunity Created", "Won"]
+    
+    # Calculate counts for each stage
+    stage_counts = []
+    stage_counts.append(len(df))  # Total MQLs Created
+    stage_counts.append(len(df[df["Status__c"] != "New"])) # Assuming "New" means not contacted yet 
+    stage_counts.append(len(df[df["Status__c"] == "Qualified"]))
+    stage_counts.append(len(df[df["Status__c"] == "Demo Scheduled"])) 
+    stage_counts.append(len(df[df["Opportunity__c"].notna()]))
+    stage_counts.append(len(df[df["Status__c"] == "Won"]))
+
+    fig = go.Figure(go.Funnel(
+        y=stages,
+        x=stage_counts,
+        textinfo="value+percent initial", # Show count and percentage 
+        marker={"color": ["#0077CC", "#66CCFF", "#009933", "#99FF99", "#FFCC99", "#FF9933"]}
+    ))
+    fig.update_layout(title="MQL Conversion Funnel")
+    return fig
+
 def create_top_campaigns_chart(df, campaign_df):
     """
     Creates a bar chart showing the top campaigns driving MQLs.
@@ -1014,7 +1042,7 @@ def create_top_campaigns_chart(df, campaign_df):
 
 def LeadSourcePerformanceCard(df):
     """
-    Visualize lead source performance with MQL count.
+    Visualize lead source performance with MQL count and conversion rate.
 
     Args:
         df (pd.DataFrame): The DataFrame containing MQL data.
@@ -1022,10 +1050,25 @@ def LeadSourcePerformanceCard(df):
     Returns:
         plotly.graph_objects.Figure: The bar chart figure.
     """
-    lead_source_data = df["Lead_Source__c"].value_counts().reset_index()
-    lead_source_data.columns = ["Lead Source", "Count"]
-    return px.bar(lead_source_data, x="Lead Source", y="Count", title="Lead Source Performance")
+    lead_source_data = df.groupby("Lead_Source__c")['Converted_to_Opportunity__c'].agg(['sum', 'count']).reset_index()
+    lead_source_data.columns = ["Lead Source", "Conversions", "Count"]
+    lead_source_data['Conversion Rate'] = lead_source_data['Conversions'] / lead_source_data['Count']
 
+    fig = px.bar(lead_source_data, x="Lead Source", y=["Count", "Conversions"], 
+                 title="Lead Source Performance - MQL Count and Conversions",
+                 barmode='group')
+    fig.update_yaxes(title_text="Count")
+
+    # Add conversion rate as text annotations on each bar
+    for i, row in lead_source_data.iterrows():
+        fig.add_annotation(
+            x=row["Lead Source"], 
+            y=row["Count"],
+            text=f"{row['Conversion Rate']:.2%}",
+            showarrow=False,
+            yshift=10 
+        )
+    return fig
 
 def ConversionRateProductInterestCard(df):
     """
@@ -1049,7 +1092,7 @@ def ConversionRateProductInterestCard(df):
 
 def MQLTrendOverTimeCard(df):
     """
-    Visualize MQL trend over time.
+    Visualize MQL trend over time, optionally grouped by Lead Source.
 
     Args:
         df (pd.DataFrame): The DataFrame containing MQL data.
@@ -1058,8 +1101,14 @@ def MQLTrendOverTimeCard(df):
         plotly.graph_objects.Figure: The line chart figure.
     """
     df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
-    mql_trend = df.groupby(df["CreatedDate"].dt.date).size().reset_index(name="Count")
-    return px.line(mql_trend, x="CreatedDate", y="Count", title="MQL Trend Over Time")
+    mql_trend = df.groupby([df["CreatedDate"].dt.date, "Lead_Source__c"]).size().reset_index(name="Count")
+
+    # Create line chart with Plotly Express
+    fig = px.line(mql_trend, x="CreatedDate", y="Count", color="Lead_Source__c", 
+                  title="MQL Trend Over Time by Lead Source") 
+    fig.update_xaxes(title_text="Date")
+    fig.update_yaxes(title_text="MQL Count")
+    return fig
 
 
 def MQLSourceConversionRateCard(df):
@@ -1086,40 +1135,56 @@ def MQLSourceConversionRateCard(df):
 
 def TimeToSQLCard(df):
     """
-    Visualize time to SQL in days with adjusted labels and handling of small data sets.
+    Visualize time to SQL (in days), handling potential issues with small or empty datasets. 
 
     Args:
         df (pd.DataFrame): The DataFrame containing MQL data.
 
     Returns:
-        plotly.graph_objects.Figure or None: The histogram figure, or None if the dataset is too small.
+        plotly.graph_objects.Figure: The histogram figure.
     """
 
-    # Calculate TimeToSQL
-    df["TimeToSQL"] = (df["MQL_Converted_Date__c"] - df["CreatedDate"]).dt.days
+    df['TimeToSQL'] = (df["MQL_Converted_Date__c"] - df["CreatedDate"]).dt.days
 
-    # Remove negative values (if any)
-    df = df[df["TimeToSQL"] >= 0]
+    # Ensure there are valid TimeToSQL values for the histogram
+    df = df[df['TimeToSQL'] >= 0] 
 
-    # Handle small datasets by checking if there are enough data points
-    if df["TimeToSQL"].nunique() > 1:
-        median_value = df["TimeToSQL"].median()
-        mean_value = df["TimeToSQL"].mean()
-
-        fig = px.histogram(df, x="TimeToSQL", title="Time to SQL (in days)")
-        fig.add_vline(
-            x=median_value,
-            line_dash="dash",
-            line_color="green",
-            annotation_text="Median",
-            annotation_position="top left",
-        )
-        fig.add_vline(
-            x=mean_value, line_dash="dash", line_color="red", annotation_text="Average", annotation_position="top right"
+    if df.empty:
+        # Handle the case where there's no data to plot
+        fig = go.Figure()
+        fig.update_layout(
+            xaxis =  { "visible": False },
+            yaxis = { "visible": False },
+            annotations = [
+                {
+                    "text": "No data available to calculate Time to SQL",
+                    "xref": "paper",
+                    "yref": "paper",
+                    "showarrow": False,
+                    "font": {"size": 16}
+                }
+            ]
         )
         return fig
-    else:
-        return None
+
+    median_value = df["TimeToSQL"].median()
+    mean_value = df["TimeToSQL"].mean()
+
+    fig = px.histogram(df, x="TimeToSQL", title="Time to SQL (in days)")
+    fig.update_xaxes(title_text="Time to SQL (days)")
+    fig.update_yaxes(title_text="Count")
+
+    fig.add_vline(
+        x=median_value,
+        line_dash="dash",
+        line_color="green",
+        annotation_text="Median",
+        annotation_position="top left",
+    )
+    fig.add_vline(
+        x=mean_value, line_dash="dash", line_color="red", annotation_text="Average", annotation_position="top right"
+    )
+    return fig
 
 
 def MQLDistributionByCampaignCard(df):
@@ -1618,7 +1683,7 @@ def main():
             vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
 
             st.markdown("### Select Report")
-            report_type = st.radio("Choose Report Type", ("Orders", "Lead Source Pipeline (MQLs)", "Open Opportunities", "SQL Bench"))
+            report_type = st.radio("Choose Report Type", ("Orders", "MQLs", "Open Opportunities", "SQL Bench"))
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
@@ -1814,8 +1879,8 @@ def main():
                                 else:
                                     st.warning("No data available for Wicked Reports export.")
 
-                    # Handle Lead Source Pipeline (MQLs) report
-                    if report_type == "Lead Source Pipeline (MQLs)":
+                    # Handle MQLs report
+                    if report_type == "MQLs":
                         df = fetch_mql_data(sf, start_date, end_date)
                         campaign_df = fetch_campaign_data(sf, start_date, end_date)
 
@@ -1841,9 +1906,11 @@ def main():
                                 target, mql_count, period_name = calculate_target_and_mql_count(df, date_option, start_date, end_date)
                                 st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
 
-                            # Display MQL conversions, lead source performance, and MQL trend over time
-                            st.plotly_chart(LeadSourcePerformanceCard(df))
+                            # Enhanced charts and visualizations:
+                            st.plotly_chart(LeadSourcePerformanceCard(df)) 
                             st.plotly_chart(MQLTrendOverTimeCard(df))
+                            st.plotly_chart(TimeToSQLCard(df)) 
+                            st.plotly_chart(MQLFunnelCard(df))  
 
                             st.subheader("MQL Data Table")
                             st.dataframe(df)
