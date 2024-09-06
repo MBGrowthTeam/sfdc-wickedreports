@@ -294,15 +294,30 @@ def map_product_family(product_name):
     response = openai_model(prompt)
     return response[0].strip() if response else "Other"
 
+# --- SQL Queries --- 
+def load_sql_query(filename):
+    """Loads a SOQL query from a file, ignoring docstrings."""
+    with open(os.path.join("sql", filename), 'r') as f:
+        lines = f.readlines()
+        query_lines = []
+        in_docstring = False
+        for line in lines:
+            if line.strip().startswith('"""'):
+                in_docstring = not in_docstring  # Toggle docstring flag
+            elif not in_docstring:
+                query_lines.append(line)
+        return "".join(query_lines).strip()
 
-def fetch_salesforce_data(sf, start_date, end_date):
+def fetch_salesforce_data(sf, start_date, end_date, brand=None):
     """
-    Fetch order data from Salesforce within a specified date range.
+    Fetch order data from Salesforce within a specified date range,
+    optionally filtered by brand.
 
     Args:
         sf: Salesforce connection object.
         start_date: Start date for the data range.
         end_date: End date for the data range.
+        brand: The brand to filter by (optional).
 
     Returns:
         A Pandas DataFrame containing the order data.
@@ -310,32 +325,12 @@ def fetch_salesforce_data(sf, start_date, end_date):
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-    query = f"""
-    SELECT 
-        Order.Id,
-        Order.CreatedDate,
-        Account.Time_Zone__c,
-        Order.TotalAmount,
-        Account.Account_Primary_Contact_Email__c,
-        Order.BillingState,
-        Order.BillingCountry,
-        Order.CurrencyIsoCode,
-        Order.BillingCity,
-        Order.Brand__c,
-        (SELECT 
-            SBQQ__Subscription__c,
-            Product_Category__c,
-            Product2Id,
-            Product_Name__c,
-            Product2.Name,
-            Product2.Family
-         FROM OrderItems)
-    FROM Order
-    WHERE Order.Brand__c IN ('Ministry Brands', 'Amplify')
-    AND Order.CreatedDate >= {start_date_str} 
-    AND Order.CreatedDate <= {end_date_str}
-    ORDER BY Order.CreatedDate
-    """
+    query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    # Only apply brand filter if a brand is provided
+    if brand: 
+        query += f" AND Order.Brand__c = '{brand}'"
+    query += " ORDER BY Order.CreatedDate"
 
     result = sf.query_all(query)
     orders = pd.DataFrame(result["records"])
@@ -348,15 +343,15 @@ def fetch_salesforce_data(sf, start_date, end_date):
                 {
                     "OrderId": order["Id"],
                     "SBQQ__Subscription__c": item.get("SBQQ__Subscription__c"),
-                    "Product_Category__c": item.get("Product_Category__c"),  # Correct column name
+                    "Product_Category__c": item.get("Product_Category__c"),
                     "ProductName": item.get("Product_Name__c"),
                 }
             )
 
     order_items_df = pd.DataFrame(order_items)
-
     df = orders.merge(order_items_df, left_on="Id", right_on="OrderId", how="left")
 
+    # Clean up the DataFrame
     df = df.drop(columns=["attributes", "OrderItems"])
     df["Account.Time_Zone__c"] = df["Account"].apply(lambda x: x["Time_Zone__c"] if x else None)
     df["Account.Account_Primary_Contact_Email__c"] = df["Account"].apply(
@@ -366,49 +361,49 @@ def fetch_salesforce_data(sf, start_date, end_date):
 
     return df
 
-
-def fetch_mql_data(sf, start_date, end_date):
+def fetch_mql_data(sf, start_date, end_date, brand_ids=None):
     """
-    Fetch MQL (Marketing Qualified Leads) data from Salesforce within a specified date range.
+    Fetch MQL (Marketing Qualified Leads) data from Salesforce within a 
+    specified date range, optionally filtered by a list of brand IDs.
 
     Args:
         sf: Salesforce connection object.
         start_date: Start date for the data range.
         end_date: End date for the data range.
+        brand_ids: A list of Salesforce brand IDs to filter by (optional).
 
     Returns:
         A Pandas DataFrame containing the MQL data.
     """
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
-    query = f"""
-    SELECT 
-        Id, OwnerId, IsDeleted, Name, CurrencyIsoCode, CreatedDate, CreatedById, 
-        LastModifiedDate, LastModifiedById, SystemModstamp, LastActivityDate, 
-        LastViewedDate, LastReferencedDate, Account__c, Address__c, Age__c, 
-        Annual_Budget__c, Brand__c, Campaign__c, Company__c, Contact__c, 
-        Description__c, Disqualification_Date__c, E_Mail_Address__c, 
-        E_Mail_Opt_Out__c, HS_Owner__c, Households__c, Hubspot_Notes__c, 
-        Industry__c, Lead_Conversion_Date__c, Lead_Source__c, Lead__c, 
-        MQL_AutoNumber__c, Mobile__c, Name__c, DEPRECATED_Name_of_the_referrer__c, 
-        Number_of_Employees__c, Opportunity__c, Phone__c, Product_Interest__c, 
-        Status__c, TWA__c, Title__c, Website__c, Salesloft_Cadence_Name__c, 
-        Parent_Account__c, Latest_Source_Drill_Down_1__c, 
-        Number_of_Activities_Converted__c, Number_of_Activities__c, 
-        Converted_to_Opportunity__c, MQL_Converted_Date__c, Name_of_the_referrer__c, 
-        Latest_Source_Drill_Down_2__c, Latest_Source__c, MQL_Reason__c, 
-        Google_ad_click_id__c, Last_Page_Seen__c, Screenings_Per_Year__c, 
-        Referring_Page__c, Account_Engagement_Comments__c, Prospect_Zip_Code__c, 
-        Self_Declared_Customer_From_Form__c, Account_Engagement_Score__c, 
-        Partner_Form_Date__c, Partner_Name_Company__c
-    FROM MQL_Record__c
-    WHERE CreatedDate >= {start_date_str} 
-    AND CreatedDate <= {end_date_str}
-    """
+    query = load_sql_query("MQL_Record__c.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    if brand_ids:
+        brand_id_list_str = ', '.join([f"'{b}'" for b in brand_ids])
+        query += f" AND Brand__c IN ({brand_id_list_str})"
+
     result = sf.query_all(query)
     df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
     return df
 
+def get_brand_id(sf, brand_name):
+    """
+    Retrieves the Salesforce ID for a given brand name.
+
+    Args:
+        sf: Salesforce connection object.
+        brand_name (str): The name of the brand.
+
+    Returns:
+        str: The Salesforce ID of the brand, or None if not found.
+    """
+    query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
+    result = sf.query(query) 
+    if result['totalSize'] > 0:
+        return result['records'][0]['Id']
+    else:
+        return None
 
 def fetch_campaign_data(sf, start_date, end_date):
     """
@@ -424,13 +419,9 @@ def fetch_campaign_data(sf, start_date, end_date):
     """
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
-    query = f"""
-    SELECT 
-        Id, Name, CreatedDate
-    FROM Campaign
-    WHERE CreatedDate >= {start_date_str} 
-    AND CreatedDate <= {end_date_str}
-    """
+
+    query = load_sql_query("Campaign.sql").format(start_date=start_date_str, end_date=end_date_str)
+
     result = sf.query_all(query)
     df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
     return df
@@ -527,7 +518,7 @@ def process_data(df):
     return df
 
 
-def fetch_wicked_reports_data(sf, start_date, end_date):
+def fetch_wicked_reports_data(sf, start_date, end_date, brand=None):
     """
     Fetches order data from Salesforce specifically for Wicked Reports export.
 
@@ -535,6 +526,7 @@ def fetch_wicked_reports_data(sf, start_date, end_date):
         sf (Salesforce): The Salesforce connection object.
         start_date (datetime): The start date for the data retrieval.
         end_date (datetime): The end date for the data retrieval.
+        brand: The brand to filter by (optional).
 
     Returns:
         pd.DataFrame: A Pandas DataFrame containing the fetched order data for Wicked Reports.
@@ -542,29 +534,11 @@ def fetch_wicked_reports_data(sf, start_date, end_date):
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-    query = f"""
-    SELECT 
-        Id,
-        CreatedDate,
-        Account.Time_Zone__c,
-        TotalAmount,
-        Account.Account_Primary_Contact_Email__c,
-        BillingState,
-        BillingCountry,
-        CurrencyIsoCode,
-        BillingCity,
-        Brand__c,
-        (SELECT 
-            SBQQ__Subscription__c,
-            Product2Id,
-            Product_Name__c
-         FROM OrderItems)
-    FROM Order
-    WHERE Brand__c IN ('Ministry Brands', 'Amplify')
-    AND CreatedDate >= {start_date_str} 
-    AND CreatedDate <= {end_date_str}
-    ORDER BY CreatedDate
-    """
+    query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    if brand:
+        query += f" AND Brand__c = '{brand}'"
+    query += " ORDER BY CreatedDate"
 
     result = sf.query_all(query)
     orders = pd.DataFrame(result["records"])
@@ -670,7 +644,6 @@ def prepare_wicked_reports_export(df):
 
     return wicked_df
 
-
 def export_wicked_report_orders(df):
     """
     Export the Salesforce data to a CSV file format compatible with Wicked Reports.
@@ -774,26 +747,25 @@ def calculate_cltv(df):
     return df.merge(cltv_df, on="CUSTOMEREMAIL", how="left")
 
 
-def calculate_product_adoption(df):
+def calculate_product_adoption(dataframe):
     """
-    Calculate product adoption rates over time, particularly for Amplify products.
+    Calculate product adoption rates over time.
 
     Args:
-        df (pd.DataFrame): The DataFrame containing order data.
+        dataframe (pd.DataFrame): The DataFrame containing order data.
 
     Returns:
         pd.DataFrame: A DataFrame with product adoption rates over time.
     """
-    df["ORDERDATETIME"] = pd.to_datetime(df["ORDERDATETIME"], errors="coerce")
-    df = df.dropna(subset=["ORDERDATETIME"])
+    dataframe["ORDERDATETIME"] = pd.to_datetime(dataframe["ORDERDATETIME"], errors="coerce")
+    dataframe = dataframe.dropna(subset=["ORDERDATETIME"])
 
-    if "PRODUCTNAME" in df.columns:
-        df["OrderYear"] = df["ORDERDATETIME"].dt.year
-        df["OrderMonth"] = df["ORDERDATETIME"].dt.month
-        amplify_df = df[df["PRODUCTNAME"].str.contains("Amplify", case=False, na=False)]
+    if "PRODUCTNAME" in dataframe.columns:
+        dataframe["OrderYear"] = dataframe["ORDERDATETIME"].dt.year
+        dataframe["OrderMonth"] = dataframe["ORDERDATETIME"].dt.month
 
         # Group by product, year, and month, then count orders
-        product_orders = amplify_df.groupby(["PRODUCTNAME", "OrderYear", "OrderMonth"])["ORDERID"].count().reset_index()
+        product_orders = dataframe.groupby(["PRODUCTNAME", "OrderYear", "OrderMonth"])["ORDERID"].count().reset_index()
 
         # Rename the count column to AdoptionRate
         product_adoption = product_orders.rename(columns={"ORDERID": "AdoptionRate"})
@@ -876,13 +848,11 @@ def calculate_velocity(sf, start_date, end_date):
     """
 
     # 1. MQL to SQL: Using MQL_Record__c object and MQL_Converted_Date__c field
-    mql_to_sql_query = f"""
-    SELECT MQL_Converted_Date__c, CreatedDate
-    FROM MQL_Record__c
-    WHERE CreatedDate >= {start_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')}
-    AND CreatedDate <= {end_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')}
-    AND MQL_Converted_Date__c != NULL
-    """
+    start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')
+    end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+    mql_to_sql_query = load_sql_query("MQL_Record__c.sql").format(start_date=start_date_str, end_date=end_date_str)
+
     mql_to_sql_result = sf.query_all(mql_to_sql_query)
     mql_to_sql_df = pd.DataFrame(mql_to_sql_result["records"]).drop(columns=["attributes"])
 
@@ -904,13 +874,8 @@ def calculate_velocity(sf, start_date, end_date):
     mql_to_sql = mql_to_sql_df["MQLToSQL"].mean()
 
     # 2. SQL to Won: Using Opportunity object and CreatedDate and CloseDate fields
-    sql_to_won_query = f"""
-    SELECT CloseDate, CreatedDate
-    FROM Opportunity
-    WHERE CreatedDate >= {start_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')}
-    AND CreatedDate <= {end_date.strftime('%Y-%m-%dT%H:%M:%S+00:00')}
-    AND IsWon = TRUE
-    """
+    sql_to_won_query = load_sql_query("Opportunity.sql").format(start_date=start_date_str, end_date=end_date_str)
+
     sql_to_won_result = sf.query_all(sql_to_won_query)
     sql_to_won_df = pd.DataFrame(sql_to_won_result["records"]).drop(columns=["attributes"])
 
@@ -1468,6 +1433,17 @@ def parse_relative_time(requirement: str):
     return None, None
 
 def identify_salesforce_objects(query: str, salesforce_data: Dict, object_aliases: Dict) -> list:
+    """
+    Identify Salesforce objects mentioned in a user's query.
+
+    Args:
+        query (str): The user's query in natural language.
+        salesforce_data (Dict): Salesforce object and field data.
+        object_aliases (Dict): Mapping of common terms to Salesforce objects.
+
+    Returns:
+        list: A list of possible Salesforce objects mentioned in the query.
+    """
     possible_objects = []
     for alias in object_aliases['object_aliases']:
         if alias['term'].lower() in query.lower():
@@ -1475,7 +1451,16 @@ def identify_salesforce_objects(query: str, salesforce_data: Dict, object_aliase
     return possible_objects
 
 def infer_relevant_fields(query: str, available_fields: list) -> list:
-    # This can be enhanced to check for specific keywords in the query and map to relevant fields
+    """
+    Infer relevant fields based on keywords in a user's query.
+
+    Args:
+        query (str): The user's query.
+        available_fields (list): List of available fields for the object.
+
+    Returns:
+        list: List of inferred relevant fields.
+    """
     if "name" in query.lower():
         return [field for field in available_fields if "Name" in field]
     if "amount" in query.lower() or "revenue" in query.lower():
@@ -1484,7 +1469,8 @@ def infer_relevant_fields(query: str, available_fields: list) -> list:
 
 def generate_soql_query_with_dynamic_dates(user_query: str, salesforce_data: Dict, object_aliases: Dict) -> str:
     """
-    Generate a SOQL query based on the user's natural language query, dynamically handling date-based and non-date-based questions.
+    Generate a SOQL query based on the user's natural language query, 
+    dynamically handling date-based and non-date-based questions.
 
     Args:
         user_query (str): The user's query in natural language.
@@ -1494,38 +1480,37 @@ def generate_soql_query_with_dynamic_dates(user_query: str, salesforce_data: Dic
     Returns:
         str: The generated SOQL query or an error message if validation fails.
     """
-    # 1. Identify the main object(s) from the user query (e.g., "Account", "Opportunity")
+    # 1. Identify the main object(s) from the user query 
     matched_objects = identify_salesforce_objects(user_query, salesforce_data, object_aliases)
     
     if not matched_objects:
         return "Error: No matching Salesforce object found for your query."
     
     # 2. Analyze the user query for context
-    date_range = parse_relative_time(user_query)  # Attempt to infer date range if it exists
+    date_range = parse_relative_time(user_query)  
     start_date, end_date = date_range
     
-    # 3. Select appropriate fields for the SOQL query based on the matched object
-    selected_object = matched_objects[0]  # Assuming we are working with the first matched object
+    # 3. Select appropriate fields based on the matched object
+    selected_object = matched_objects[0]  
     available_fields = salesforce_data['object_tree'].get(selected_object, [])
     
     if not available_fields:
         return f"Error: No fields available for the object '{selected_object}'."
     
-    # Dynamically select the fields based on the query context or default to a few fields
+    # Dynamically select the fields 
     relevant_fields = infer_relevant_fields(user_query, available_fields)
     field_str = ', '.join(relevant_fields)
     
     # 4. Generate the SOQL query dynamically
     soql_query = f"SELECT {field_str} FROM {selected_object}"
     
-    # 5. Add time-based filters if a valid date range is inferred
+    # 5. Add time-based filters if dates are inferred
     if start_date and end_date:
         start_date_str = start_date.strftime('%Y-%m-%dT00:00:00Z')
         end_date_str = end_date.strftime('%Y-%m-%dT23:59:59Z')
         soql_query += f" WHERE CreatedDate >= {start_date_str} AND CreatedDate <= {end_date_str}"
     
-    # If no dates are detected, proceed without the WHERE clause
-    return soql_query.strip().replace("  ", " ")  # Clean up extra spaces
+    return soql_query.strip().replace("  ", " ") 
 
 def validate_required_columns(sf, object_name: str, required_fields: list):
     """
@@ -1540,7 +1525,7 @@ def validate_required_columns(sf, object_name: str, required_fields: list):
         tuple: A tuple containing the valid fields and the missing fields.
     """
     try:
-        # Describe the Salesforce object to get its metadata
+        # Describe the object to get its metadata
         object_metadata = sf.__getattr__(object_name).describe()
         existing_fields = [f['name'] for f in object_metadata['fields']]
 
@@ -1550,7 +1535,7 @@ def validate_required_columns(sf, object_name: str, required_fields: list):
 
         return valid_fields, missing_fields
     except Exception as e:
-        logging.error(f"Error while validating columns for object {object_name}: {str(e)}")
+        logging.error(f"Error validating columns for {object_name}: {str(e)}")
         return [], required_fields
 
 def generate_soql_query(object_name: str, required_fields: list, sf):
@@ -1569,13 +1554,13 @@ def generate_soql_query(object_name: str, required_fields: list, sf):
     valid_fields, missing_fields = validate_required_columns(sf, object_name, required_fields)
 
     if missing_fields:
-        st.warning(f"The following required columns are missing: {missing_fields}")
+        st.warning(f"Required columns missing: {missing_fields}")
 
     # If no valid fields are found, return an error
     if not valid_fields:
         return f"Error: No valid fields found for object '{object_name}'."
 
-    # Generate the SOQL query string dynamically based on available fields
+    # Generate the SOQL query string based on available fields
     fields_str = ', '.join(valid_fields)
     query = f"SELECT {fields_str} FROM {object_name}"
 
@@ -1610,14 +1595,16 @@ def fetch_salesforce_data_with_validation(sf, object_name, required_fields):
         return None, error_message
 
 # Opportunities 
-def fetch_open_opportunities_data(sf, start_date, end_date):
+def fetch_open_opportunities_data(sf, start_date, end_date, brand=None):
     """
-    Fetch open opportunities data from Salesforce within a specified date range.
+    Fetch open opportunities data from Salesforce within a specified date range,
+    optionally filtered by brand.
 
     Args:
         sf: Salesforce connection object.
         start_date: Start date for the data range.
         end_date: End date for the data range.
+        brand: The brand to filter by (optional).
 
     Returns:
         pd.DataFrame: A Pandas DataFrame containing the fetched open opportunities data.
@@ -1625,14 +1612,11 @@ def fetch_open_opportunities_data(sf, start_date, end_date):
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-    # Corrected SOQL Query 
-    query = f"""
-    SELECT Id, Name, Amount, StageName, CloseDate, LeadSource, CreatedDate
-    FROM Opportunity
-    WHERE IsClosed = FALSE 
-    AND CreatedDate >= {start_date_str}
-    AND CreatedDate <= {end_date_str}
-    """
+    query = load_sql_query("Opportunity.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    if brand:
+        query += f" AND Brand__c = '{brand}'"
+
     result = sf.query_all(query)
     df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
     return df
@@ -1667,60 +1651,111 @@ def OpenOpportunitiesByStageCard(df):
     return px.bar(stage_data, x="Stage", y="Count", title="Open Opportunities by Stage")
 
 def OpenOpportunitiesTrendCard(df):
-    """Visualize open opportunities trend over time."""
+    """
+    Visualize open opportunities trend over time.
+
+    Args:
+        df (pd.DataFrame): The processed open opportunities data.
+
+    Returns:
+        plotly.graph_objects.Figure: The line chart figure.
+    """
     df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
     trend_data = df.groupby(df["CreatedDate"].dt.date).size().reset_index(name="Count")
     return px.line(trend_data, x="CreatedDate", y="Count", title="Open Opportunities Trend")
 
 # Leads
-def fetch_lead_data(sf, start_date, end_date):
-    """Fetches lead data from Salesforce within a specified date range."""
+def fetch_lead_data(sf, start_date, end_date, brand=None):
+    """
+    Fetches lead data from Salesforce within a specified date range,
+    optionally filtered by brand.
+
+    Args:
+        sf: Salesforce connection object.
+        start_date: Start date for the data range.
+        end_date: End date for the data range.
+        brand: The brand to filter by (optional).
+
+    Returns:
+        pd.DataFrame: A Pandas DataFrame containing the fetched lead data.
+    """
     start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
     end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
-    query = f"""
-    SELECT 
-        Id, IsDeleted, Name, CreatedDate, LeadSource, Status, Industry, Rating, 
-        AnnualRevenue, NumberOfEmployees, OwnerId, IsConverted, ConvertedDate, 
-        Age__c, Brand__c, Lead_Assigned_Date__c, 
-        Lead_Conversion_Date__c, Marketo_Lead_Score__c, HS_Owner__c, TWA__c, 
-        Hubspot_Notes__c, MQL_Date__c, MQL_Record__c, Annual_Budget__c, 
-        Product_Interest__c, SalesLoft1__Most_Recent_Cadence_Name__c, 
-        Latest_Source__c, Latest_Source_Drill_Down_1__c,
-        Latest_Source_Drill_Down_2__c 
-    FROM Lead
-    WHERE CreatedDate >= {start_date_str}
-    AND CreatedDate <= {end_date_str}
-    """
+    query = load_sql_query("Lead.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    if brand:
+        query += f" AND Brand__c = '{brand}'"
+
     result = sf.query_all(query)
     df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
     return df
 
 def process_lead_data(df):
-    """Processes lead data, including handling timezones and calculating lead age."""
+    """
+    Processes lead data, including handling timezones and calculating lead age.
+
+    Args:
+        df (pd.DataFrame): The raw lead data.
+
+    Returns:
+        pd.DataFrame: Processed lead data.
+    """
     df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
     df["ConvertedDate"] = pd.to_datetime(df["ConvertedDate"])
     df["LeadAge"] = (datetime.now(timezone.utc) - df["CreatedDate"]).dt.days
     return df
 
 def LeadsBySourceCard(df):
-    """Visualizes leads by source using a bar chart."""
+    """
+    Visualizes leads by source using a bar chart.
+
+    Args:
+        df (pd.DataFrame): The processed lead data.
+
+    Returns:
+        plotly.graph_objects.Figure: The bar chart figure.
+    """
     lead_source_counts = df["LeadSource"].value_counts().reset_index()
     lead_source_counts.columns = ["Lead Source", "Count"]
     return px.bar(lead_source_counts, x="Lead Source", y="Count", title="Leads by Source")
 
 def LeadConversionOverTimeCard(df):
-    """Visualizes lead conversion trend over time with a line chart."""
+    """
+    Visualizes lead conversion trend over time with a line chart.
+
+    Args:
+        df (pd.DataFrame): The processed lead data.
+
+    Returns:
+        plotly.graph_objects.Figure: The line chart figure.
+    """
     df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
     converted_leads = df[df["IsConverted"] == True]
     conversion_trend = converted_leads.groupby(converted_leads["CreatedDate"].dt.date).size().reset_index(name="Conversions")
     return px.line(conversion_trend, x="CreatedDate", y="Conversions", title="Lead Conversion Trend Over Time")
 
 def LeadAgeDistributionCard(df):
-    """Visualizes lead age distribution using a histogram."""
+    """
+    Visualizes lead age distribution using a histogram.
+
+    Args:
+        df (pd.DataFrame): The processed lead data.
+
+    Returns:
+        plotly.graph_objects.Figure: The histogram figure.
+    """
     return px.histogram(df, x="LeadAge", title="Lead Age Distribution")
 
 def LeadConversionFunnelCard(df):
-    """Visualizes the lead conversion funnel with a funnel chart."""
+    """
+    Visualizes the lead conversion funnel with a funnel chart.
+
+    Args:
+        df (pd.DataFrame): The processed lead data.
+
+    Returns:
+        plotly.graph_objects.Figure: The funnel chart figure.
+    """
     stages = ["Lead Created", "Contacted", "Qualified", "Demo Scheduled", "Opportunity Created", "Won"]
 
     # You need to adjust these conditions based on your Salesforce data
@@ -1743,16 +1778,22 @@ def LeadConversionFunnelCard(df):
     return fig
 
 def main():
-    """
-    Main function to run the Streamlit application.
-    """
+    """Main function to run the Streamlit application."""
 
-    # First, check if the user is authenticated before proceeding to the main dashboard
+    # Load brands from brands.json
+    with open('brands.json', 'r') as f:
+        brands_by_vertical = json.load(f)
+
+    # First, check if the user is authenticated
     if check_password():
         # Sidebar for navigation
         with st.sidebar:
             st.markdown("### Select Business Vertical")
-            vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
+            selected_vertical = st.selectbox("Choose", list(brands_by_vertical.keys()))
+
+            # Dynamically create the brand selection based on the chosen vertical
+            available_brands = brands_by_vertical[selected_vertical]
+            selected_brand = st.selectbox("Select Brand", ["ALL"] + available_brands)
 
             st.markdown("### Select Report")
             report_type = st.radio("Choose Report Type", ("Orders", "MQLs", "Leads", "Open Opportunities", "SQL Bench"))
@@ -1767,8 +1808,8 @@ def main():
             if st.button("Generate Query"):
                 if user_question:
                     with st.spinner("Generating SOQL query..."):
-                        sf = connect_to_salesforce()
-                        if sf:
+                        salesforce = connect_to_salesforce()
+                        if salesforce:
                             # Generate the SOQL query based on the user's question
                             soql_query = generate_soql_query_with_dynamic_dates(user_question, salesforce_data, object_aliases)
                             st.session_state.generated_query = soql_query  # Save to session state
@@ -1784,20 +1825,20 @@ def main():
             if st.button("Run Query"):
                 if sql_input:
                     with st.spinner("Running query..."):
-                        sf = connect_to_salesforce()  # Connect to Salesforce
+                        salesforce = connect_to_salesforce()  # Connect to Salesforce
 
-                        if sf:
+                        if salesforce:
                             try:
                                 # Run query with retry mechanism and OpenAI refinement
-                                df = run_soql_query_until_not_empty(sf, openai_model, sql_input, salesforce_data)
+                                dataframe = run_soql_query_until_not_empty(salesforce, openai_model, sql_input, salesforce_data)
 
                                 # Handle the case where the result is None (error occurred) or empty (no data)
-                                if df is not None:
-                                    if not df.empty:
-                                        st.dataframe(df)  # Display the DataFrame in the app
+                                if dataframe is not None:
+                                    if not dataframe.empty:
+                                        st.dataframe(dataframe)  # Display the DataFrame in the app
 
                                         # CSV download button for query results
-                                        query_results_csv = df.to_csv(index=False)
+                                        query_results_csv = dataframe.to_csv(index=False)
                                         st.download_button(
                                             label="Download Query Results CSV",
                                             data=query_results_csv,
@@ -1817,9 +1858,9 @@ def main():
                     st.warning("Please enter a SOQL query.")
 
         else:
-            # Display date range selection and "Fetch Data" button for Orders and MQL reports
-            col1, col2 = st.columns(2)
-            with col1:
+            # Display date range selection and "Fetch Data" button for other reports
+            column1, column2 = st.columns(2)
+            with column1:
                 date_option = st.selectbox(
                     "Select Date Range",
                     (
@@ -1857,42 +1898,50 @@ def main():
             # Fetch and display data on button click
             if st.button("Fetch Data"):
                 with st.spinner("Fetching data from Salesforce..."):
-                    sf = connect_to_salesforce()
-                    if not sf:
+                    salesforce = connect_to_salesforce()
+                    if not salesforce:
                         return
 
-                    # Handle Orders report
-                    if report_type == "Orders":
-                        df = fetch_salesforce_data(sf, start_date, end_date)
-                        wicked_reports_df = fetch_wicked_reports_data(sf, start_date, end_date)
+                    # --- Handling Report Types based on Vertical and Brand ---
 
-                        if df.empty:
+                    if selected_brand == "ALL":
+                        # Get the Salesforce IDs of all brands in the vertical
+                        brand_filter = [get_brand_id(salesforce, b) for b in available_brands] 
+                    else:
+                        # Get the Salesforce ID of the selected brand
+                        brand_filter = [get_brand_id(salesforce, selected_brand)] 
+
+                    if report_type == "Orders":
+                        dataframe = fetch_salesforce_data(salesforce, start_date, end_date, brand=brand_filter)
+                        wicked_reports_dataframe = fetch_wicked_reports_data(salesforce, start_date, end_date, brand=brand_filter)
+                        
+                        if dataframe.empty:
                             st.warning("No data found for the selected date range.")
                         else:
-                            processed_df = process_data(df)
-                            processed_df = calculate_cltv(processed_df)
-                            product_adoption = calculate_product_adoption(processed_df)
+                            processed_dataframe = process_data(dataframe)
+                            processed_dataframe = calculate_cltv(processed_dataframe)
+                            product_adoption = calculate_product_adoption(processed_dataframe)
 
                             # Display key metrics and visualizations
                             if not product_adoption.empty:
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("Total Orders", len(processed_df))
-                                with col2:
-                                    if "ORDERTOTAL" in processed_df.columns:
-                                        total_revenue = processed_df["ORDERTOTAL"].sum()
+                                column1, column2, column3 = st.columns(3)
+                                with column1:
+                                    st.metric("Total Orders", len(processed_dataframe))
+                                with column2:
+                                    if "ORDERTOTAL" in processed_dataframe.columns:
+                                        total_revenue = processed_dataframe["ORDERTOTAL"].sum()
                                         st.metric("Total Revenue", f"${total_revenue:,.2f}")
                                     else:
                                         st.metric("Total Revenue", "N/A")
-                                with col3:
-                                    if "ORDERTOTAL" in processed_df.columns:
-                                        avg_order_value = processed_df["ORDERTOTAL"].mean()
-                                        st.metric("Average Order Value", f"${avg_order_value:,.2f}")
+                                with column3:
+                                    if "ORDERTOTAL" in processed_dataframe.columns:
+                                        average_order_value = processed_dataframe["ORDERTOTAL"].mean()
+                                        st.metric("Average Order Value", f"${average_order_value:,.2f}")
                                     else:
                                         st.metric("Average Order Value", "N/A")
 
                                 # Orders by State visualization
-                                state_counts = processed_df["CUSTOMERSTATE"].value_counts().reset_index()
+                                state_counts = processed_dataframe["CUSTOMERSTATE"].value_counts().reset_index()
                                 state_counts.columns = ["State", "Order Count"]
                                 st.plotly_chart(
                                     px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
@@ -1900,14 +1949,14 @@ def main():
                                 )
 
                                 # Orders by Product Category (Pie Chart)
-                                category_counts = processed_df["Product_Category__c"].value_counts().reset_index()
+                                category_counts = processed_dataframe["Product_Category__c"].value_counts().reset_index()
                                 category_counts.columns = ["Product Category", "Order Count"]
                                 st.plotly_chart(
                                     px.pie(
                                         category_counts,
                                         values="Order Count",
                                         names="Product Category",
-                                        title="Orders by Product Category (Amplify)",
+                                        title=f"Orders by Product Category ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
                                     ),
                                     use_container_width=True,
                                 )
@@ -1919,17 +1968,17 @@ def main():
                                         x="OrderMonth",
                                         y="AdoptionRate",
                                         color="PRODUCTNAME",
-                                        title="Amplify Product Adoption Rates Over Time",
-                                    ).update_layout(legend_title_text="Amplify Products"),
+                                        title=f"Product Adoption Rates Over Time ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
+                                    ).update_layout(legend_title_text=f"{selected_brand if selected_brand != 'ALL' else selected_vertical} Products"),
                                     use_container_width=True,
                                 )
 
                                 # Display data table
                                 st.subheader("Salesforce Data Table")
-                                st.dataframe(processed_df)
+                                st.dataframe(processed_dataframe)
 
                                 # CSV download buttons
-                                complete_csv = processed_df.to_csv(index=False)
+                                complete_csv = processed_dataframe.to_csv(index=False)
                                 st.download_button(
                                     label="Download Complete CSV",
                                     data=complete_csv,
@@ -1937,11 +1986,11 @@ def main():
                                     mime="text/csv",
                                 )
 
-                                if not wicked_reports_df.empty:
-                                    wicked_df = prepare_wicked_reports_export(wicked_reports_df)
+                                if not wicked_reports_dataframe.empty:
+                                    wicked_dataframe = prepare_wicked_reports_export(wicked_reports_dataframe)
                                     st.subheader("Wicked Reports Data Table")
-                                    st.dataframe(wicked_df)
-                                    wicked_csv = wicked_df.to_csv(index=False)
+                                    st.dataframe(wicked_dataframe)
+                                    wicked_csv = wicked_dataframe.to_csv(index=False)
                                     st.download_button(
                                         label="Download Wicked Reports CSV",
                                         data=wicked_csv,
@@ -1951,120 +2000,114 @@ def main():
                                 else:
                                     st.warning("No data available for Wicked Reports export.")
 
-                    # Handle MQLs report
-                    if report_type == "MQLs":
-                        df = fetch_mql_data(sf, start_date, end_date)
-                        campaign_df = fetch_campaign_data(sf, start_date, end_date)
+                    elif report_type == "MQLs":
+                        dataframe = fetch_mql_data(salesforce, start_date, end_date, brand_ids=brand_filter)  # Pass brand_filter as brand_ids
+                        campaign_dataframe = fetch_campaign_data(salesforce, start_date, end_date)
 
-                        if vertical == "Protestant (Default)":
-                            df = df[df["Product_Interest__c"] == "Amplify"]
-
-                        if df.empty:
+                        if dataframe.empty:
                             st.warning("No MQL data found for the selected date range.")
                         else:
-                            df = process_mql_data(df)
+                            dataframe = process_mql_data(dataframe)
                             st.subheader("MQL Dashboard")
 
                             # Display MQL metrics and charts
-                            total_mqls = len(df)
-                            avg_lead_age = df["LeadAge"].mean()
+                            total_mqls = len(dataframe)
+                            average_lead_age = dataframe["LeadAge"].mean()
 
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
+                            column1, column2, column3 = st.columns(3)
+                            with column1:
                                 st.metric("How many MQLs did we generate?", total_mqls)
-                            with col2:
-                                st.metric("What's the average new lead to MQL age?", f"{avg_lead_age:.1f} days")
-                            with col3:
-                                target, mql_count, period_name = calculate_target_and_mql_count(df, date_option, start_date, end_date)
+                            with column2:
+                                st.metric("What's the average new lead to MQL age?", f"{average_lead_age:.1f} days")
+                            with column3:
+                                target, mql_count, period_name = calculate_target_and_mql_count(dataframe, date_option, start_date, end_date)
                                 st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
 
                             # Enhanced charts and visualizations:
-                            st.plotly_chart(LeadSourcePerformanceCard(df)) 
-                            st.plotly_chart(MQLTrendOverTimeCard(df))
-                            st.plotly_chart(TimeToSQLCard(df)) 
-                            st.plotly_chart(MQLFunnelCard(df))  
+                            st.plotly_chart(LeadSourcePerformanceCard(dataframe)) 
+                            st.plotly_chart(MQLTrendOverTimeCard(dataframe))
+                            st.plotly_chart(TimeToSQLCard(dataframe)) 
+                            st.plotly_chart(MQLFunnelCard(dataframe))  
 
                             st.subheader("MQL Data Table")
-                            st.dataframe(df)
+                            st.dataframe(dataframe)
                             st.download_button(
                                 label="Download MQL CSV",
-                                data=df.to_csv(index=False),
+                                data=dataframe.to_csv(index=False),
                                 file_name="mql_export.csv",
                                 mime="text/csv",
                             )
 
-                    # Handle Open Opportunities report
-                    elif report_type == "Open Opportunities":
-                        df = fetch_open_opportunities_data(sf, start_date, end_date)
-
-                        if df.empty:
-                            st.warning("No open opportunities found for the selected date range.")
-                        else:
-                            df = process_open_opportunities_data(df)
-                            st.subheader("Open Opportunities Dashboard")
-
-                            # Display Open Opportunities metrics and charts
-                            total_open_opps = len(df)
-                            avg_days_open = df["DaysOpen"].mean()
-                            total_value = df["Amount"].sum()
-
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Total Open Opportunities", total_open_opps)
-                            with col2:
-                                st.metric("Average Days Open", f"{avg_days_open:.1f} days")
-                            with col3:
-                                st.metric("Total Opportunity Value", f"${total_value:,.2f}")
-
-                            # Display Open Opportunities charts
-                            st.plotly_chart(OpenOpportunitiesByStageCard(df))
-                            st.plotly_chart(OpenOpportunitiesTrendCard(df))
-
-                            st.subheader("Open Opportunities Data Table")
-                            st.dataframe(df)
-                            st.download_button(
-                                label="Download Open Opportunities CSV",
-                                data=df.to_csv(index=False),
-                                file_name="open_opportunities_export.csv",
-                                mime="text/csv",
-                            )
-
-                    # Handle Leads report
                     elif report_type == "Leads":
-                        df = fetch_lead_data(sf, start_date, end_date)
+                        dataframe = fetch_lead_data(salesforce, start_date, end_date, brand=brand_filter)
 
-                        if df.empty:
+                        if dataframe.empty:
                             st.warning("No lead data found for the selected date range.")
                         else:
-                            df = process_lead_data(df)
+                            dataframe = process_lead_data(dataframe)
                             st.subheader("Lead Dashboard")
 
                             # Display Lead metrics and charts
-                            total_leads = len(df)
-                            avg_lead_age = df["LeadAge"].mean()
+                            total_leads = len(dataframe)
+                            average_lead_age = dataframe["LeadAge"].mean()
 
-                            col1, col2 = st.columns(2)
-                            with col1:
+                            column1, column2 = st.columns(2)
+                            with column1:
                                 st.metric("Total Leads", total_leads)
-                            with col2:
-                                st.metric("Average Lead Age", f"{avg_lead_age:.1f} days")
+                            with column2:
+                                st.metric("Average Lead Age", f"{average_lead_age:.1f} days")
 
                             # Display Lead charts
-                            st.plotly_chart(LeadsBySourceCard(df))
-                            st.plotly_chart(LeadConversionOverTimeCard(df))
-                            st.plotly_chart(LeadAgeDistributionCard(df))
-                            st.plotly_chart(LeadConversionFunnelCard(df))
+                            st.plotly_chart(LeadsBySourceCard(dataframe))
+                            st.plotly_chart(LeadConversionOverTimeCard(dataframe))
+                            st.plotly_chart(LeadAgeDistributionCard(dataframe))
+                            st.plotly_chart(LeadConversionFunnelCard(dataframe))
 
                             # Display data table
                             st.subheader("Lead Data Table")
-                            st.dataframe(df)
+                            st.dataframe(dataframe)
 
                             # CSV download button
-                            csv_data = df.to_csv(index=False)
+                            csv_data = dataframe.to_csv(index=False)
                             st.download_button(
                                 label="Download Leads CSV",
                                 data=csv_data,
                                 file_name="leads_export.csv",
+                                mime="text/csv",
+                            )
+
+                    elif report_type == "Open Opportunities":
+                        dataframe = fetch_open_opportunities_data(salesforce, start_date, end_date, brand=brand_filter)
+
+                        if dataframe.empty:
+                            st.warning("No open opportunities found for the selected date range.")
+                        else:
+                            dataframe = process_open_opportunities_data(dataframe)
+                            st.subheader("Open Opportunities Dashboard")
+
+                            # Display Open Opportunities metrics and charts
+                            total_open_opportunities = len(dataframe)
+                            average_days_open = dataframe["DaysOpen"].mean()
+                            total_value = dataframe["Amount"].sum()
+
+                            column1, column2, column3 = st.columns(3)
+                            with column1:
+                                st.metric("Total Open Opportunities", total_open_opportunities)
+                            with column2:
+                                st.metric("Average Days Open", f"{average_days_open:.1f} days")
+                            with column3:
+                                st.metric("Total Opportunity Value", f"${total_value:,.2f}")
+
+                            # Display Open Opportunities charts
+                            st.plotly_chart(OpenOpportunitiesByStageCard(dataframe))
+                            st.plotly_chart(OpenOpportunitiesTrendCard(dataframe))
+
+                            st.subheader("Open Opportunities Data Table")
+                            st.dataframe(dataframe)
+                            st.download_button(
+                                label="Download Open Opportunities CSV",
+                                data=dataframe.to_csv(index=False),
+                                file_name="open_opportunities_export.csv",
                                 mime="text/csv",
                             )
 
