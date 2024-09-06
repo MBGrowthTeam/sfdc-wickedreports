@@ -1201,6 +1201,7 @@ def MQLDistributionByCampaignCard(df):
     campaign_distribution.columns = ["Campaign", "Count"]
     return px.bar(campaign_distribution, x="Campaign", y="Count", title="MQL Distribution by Campaign")
 
+# SQL Workbench with AI
 def load_json_data(filepath):
     """
     Loads JSON data from the provided file path, handles nested structures if present.
@@ -1608,6 +1609,7 @@ def fetch_salesforce_data_with_validation(sf, object_name, required_fields):
         logging.error(error_message)
         return None, error_message
 
+# Opportunities 
 def fetch_open_opportunities_data(sf, start_date, end_date):
     """
     Fetch open opportunities data from Salesforce within a specified date range.
@@ -1670,6 +1672,76 @@ def OpenOpportunitiesTrendCard(df):
     trend_data = df.groupby(df["CreatedDate"].dt.date).size().reset_index(name="Count")
     return px.line(trend_data, x="CreatedDate", y="Count", title="Open Opportunities Trend")
 
+# Leads
+def fetch_lead_data(sf, start_date, end_date):
+    """Fetches lead data from Salesforce within a specified date range."""
+    start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
+    end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+    query = f"""
+    SELECT 
+        Id, IsDeleted, Name, CreatedDate, LeadSource, Status, Industry, Rating, 
+        AnnualRevenue, NumberOfEmployees, OwnerId, IsConverted, ConvertedDate, 
+        Age__c, Brand__c, Lead_Assigned_Date__c, 
+        Lead_Conversion_Date__c, Marketo_Lead_Score__c, HS_Owner__c, TWA__c, 
+        Hubspot_Notes__c, MQL_Date__c, MQL_Record__c, Annual_Budget__c, 
+        Product_Interest__c, SalesLoft1__Most_Recent_Cadence_Name__c, 
+        Latest_Source__c, Latest_Source_Drill_Down_1__c,
+        Latest_Source_Drill_Down_2__c 
+    FROM Lead
+    WHERE CreatedDate >= {start_date_str}
+    AND CreatedDate <= {end_date_str}
+    """
+    result = sf.query_all(query)
+    df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
+    return df
+
+def process_lead_data(df):
+    """Processes lead data, including handling timezones and calculating lead age."""
+    df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
+    df["ConvertedDate"] = pd.to_datetime(df["ConvertedDate"])
+    df["LeadAge"] = (datetime.now(timezone.utc) - df["CreatedDate"]).dt.days
+    return df
+
+def LeadsBySourceCard(df):
+    """Visualizes leads by source using a bar chart."""
+    lead_source_counts = df["LeadSource"].value_counts().reset_index()
+    lead_source_counts.columns = ["Lead Source", "Count"]
+    return px.bar(lead_source_counts, x="Lead Source", y="Count", title="Leads by Source")
+
+def LeadConversionOverTimeCard(df):
+    """Visualizes lead conversion trend over time with a line chart."""
+    df["CreatedDate"] = pd.to_datetime(df["CreatedDate"])
+    converted_leads = df[df["IsConverted"] == True]
+    conversion_trend = converted_leads.groupby(converted_leads["CreatedDate"].dt.date).size().reset_index(name="Conversions")
+    return px.line(conversion_trend, x="CreatedDate", y="Conversions", title="Lead Conversion Trend Over Time")
+
+def LeadAgeDistributionCard(df):
+    """Visualizes lead age distribution using a histogram."""
+    return px.histogram(df, x="LeadAge", title="Lead Age Distribution")
+
+def LeadConversionFunnelCard(df):
+    """Visualizes the lead conversion funnel with a funnel chart."""
+    stages = ["Lead Created", "Contacted", "Qualified", "Demo Scheduled", "Opportunity Created", "Won"]
+
+    # You need to adjust these conditions based on your Salesforce data
+    stage_counts = [
+        len(df),  # Total Leads Created
+        len(df[df["Status"] != "New"]),  # Assuming "New" means not contacted
+        len(df[df["Status"] == "Qualified"]),
+        len(df[df["Status"] == "Demo Scheduled"]),  # Customize based on your process
+        len(df[df["IsConverted"] == True]),  # Converted to Opportunity
+        len(df[df["Status"] == "Won"])  # Opportunities Won (you might need to join with Opportunity data)
+    ]
+
+    fig = go.Figure(go.Funnel(
+        y=stages,
+        x=stage_counts,
+        textinfo="value+percent initial",  # Show count and percentage
+        marker={"color": ["#0077CC", "#66CCFF", "#009933", "#99FF99", "#FFCC99", "#FF9933"]}
+    ))
+    fig.update_layout(title="Lead Conversion Funnel")
+    return fig
+
 def main():
     """
     Main function to run the Streamlit application.
@@ -1683,7 +1755,7 @@ def main():
             vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
 
             st.markdown("### Select Report")
-            report_type = st.radio("Choose Report Type", ("Orders", "MQLs", "Open Opportunities", "SQL Bench"))
+            report_type = st.radio("Choose Report Type", ("Orders", "MQLs", "Leads", "Open Opportunities", "SQL Bench"))
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
@@ -1954,6 +2026,45 @@ def main():
                                 label="Download Open Opportunities CSV",
                                 data=df.to_csv(index=False),
                                 file_name="open_opportunities_export.csv",
+                                mime="text/csv",
+                            )
+
+                    # Handle Leads report
+                    elif report_type == "Leads":
+                        df = fetch_lead_data(sf, start_date, end_date)
+
+                        if df.empty:
+                            st.warning("No lead data found for the selected date range.")
+                        else:
+                            df = process_lead_data(df)
+                            st.subheader("Lead Dashboard")
+
+                            # Display Lead metrics and charts
+                            total_leads = len(df)
+                            avg_lead_age = df["LeadAge"].mean()
+
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Total Leads", total_leads)
+                            with col2:
+                                st.metric("Average Lead Age", f"{avg_lead_age:.1f} days")
+
+                            # Display Lead charts
+                            st.plotly_chart(LeadsBySourceCard(df))
+                            st.plotly_chart(LeadConversionOverTimeCard(df))
+                            st.plotly_chart(LeadAgeDistributionCard(df))
+                            st.plotly_chart(LeadConversionFunnelCard(df))
+
+                            # Display data table
+                            st.subheader("Lead Data Table")
+                            st.dataframe(df)
+
+                            # CSV download button
+                            csv_data = df.to_csv(index=False)
+                            st.download_button(
+                                label="Download Leads CSV",
+                                data=csv_data,
+                                file_name="leads_export.csv",
                                 mime="text/csv",
                             )
 

@@ -14,6 +14,23 @@ SF_TOKEN = os.getenv("SF_TOKEN")
 SF_CONSUMER_KEY = os.getenv("SF_CONSUMER_KEY")
 SF_CONSUMER_SECRET = os.getenv("SF_CONSUMER_SECRET")
 
+# List of primary objects
+PRIMARY_OBJECTS = [
+    "Account",
+    "Asset",
+    "Case",
+    "Contact",
+    "Contract",
+    "Lead",
+    "Opportunity",
+    "Order",
+    "Product2",
+    "Quote",
+    "SBQQ__Subscription__c", 
+    "WeGather_Project__c", 
+    "WeShare_Site__c" 
+]
+
 # Initialize session state for memory
 if "sf_connection" not in st.session_state:
     st.session_state.sf_connection = None
@@ -90,7 +107,14 @@ def main():
 
     # Display objects and allow selection
     if st.session_state.sf_objects:
-        selected_object = st.selectbox("Select a Salesforce Object", st.session_state.sf_objects)
+        object_type = st.radio("Select Object Type:", ("All Objects", "Primary Objects"))
+
+        if object_type == "All Objects":
+            display_objects = st.session_state.sf_objects
+        else:
+            display_objects = [obj for obj in st.session_state.sf_objects if obj in PRIMARY_OBJECTS]
+
+        selected_object = st.selectbox("Select a Salesforce Object", display_objects)
 
         if st.button(f"Generate Rows for {selected_object}"):
             sf = st.session_state.sf_connection
@@ -104,4 +128,4 @@ def main():
                         st.write(f"No data available for {selected_object} or unable to retrieve data.")
 
 if __name__ == "__main__":
-    main()
+    main() 
