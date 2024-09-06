@@ -387,25 +387,6 @@ def fetch_mql_data(sf, start_date, end_date, brand_ids=None):
     df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
     return df
 
-def get_brand_id(sf, brand_name):
-    """
-    Retrieves the Salesforce ID for a given brand name.
-
-    Args:
-        sf: Salesforce connection object.
-        brand_name (str): The name of the brand.
-
-    Returns:
-        str: The Salesforce ID of the brand, or an empty string if not found.
-    """
-    # Assuming you have a "Brand" object in Salesforce to store brand information
-    query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
-    result = sf.query(query) 
-    if result['totalSize'] > 0:
-        return result['records'][0]['Id']
-    else:
-        return ''  # Return an empty string if the brand is not found
-
 def fetch_campaign_data(sf, start_date, end_date):
     """
     Fetch data from the Campaign object within the specified date range.
@@ -1906,11 +1887,9 @@ def main():
                     # --- Handling Report Types based on Vertical and Brand ---
 
                     if selected_brand == "ALL":
-                        # Get the Salesforce IDs of all brands in the vertical
-                        brand_filter = [get_brand_id(salesforce, b) for b in available_brands] 
+                        brand_filter = None  # Fetch data for all brands in the vertical
                     else:
-                        # Get the Salesforce ID of the selected brand
-                        brand_filter = [get_brand_id(salesforce, selected_brand)] 
+                        brand_filter = selected_brand
 
                     if report_type == "Orders":
                         dataframe = fetch_salesforce_data(salesforce, start_date, end_date, brand=brand_filter)
@@ -2002,7 +1981,7 @@ def main():
                                     st.warning("No data available for Wicked Reports export.")
 
                     elif report_type == "MQLs":
-                        dataframe = fetch_mql_data(salesforce, start_date, end_date, brand_ids=brand_filter)  # Pass brand_filter as brand_ids
+                        dataframe = fetch_mql_data(salesforce, start_date, end_date, brand=brand_filter)
                         campaign_dataframe = fetch_campaign_data(salesforce, start_date, end_date)
 
                         if dataframe.empty:
