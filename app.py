@@ -396,14 +396,15 @@ def get_brand_id(sf, brand_name):
         brand_name (str): The name of the brand.
 
     Returns:
-        str: The Salesforce ID of the brand, or None if not found.
+        str: The Salesforce ID of the brand, or an empty string if not found.
     """
+    # Assuming you have a "Brand" object in Salesforce to store brand information
     query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
     result = sf.query(query) 
     if result['totalSize'] > 0:
         return result['records'][0]['Id']
     else:
-        return None
+        return ''  # Return an empty string if the brand is not found
 
 def fetch_campaign_data(sf, start_date, end_date):
     """
