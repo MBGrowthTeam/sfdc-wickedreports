@@ -1,6 +1,9 @@
 # Frontend/UI Libraries
 import streamlit as st  # Streamlit for building interactive web apps
 
+# Security
+from passlib.hash import bcrypt # Hashlib for hashing sensitive information
+
 # Set the page configuration as the first Streamlit command
 st.set_page_config(layout="wide", page_title="Salesforce Data Dashboard")
 
@@ -34,6 +37,15 @@ import dspy  # (Assumed to be a specialized data science or signal processing li
 # Configuration Parsing
 import toml  # TOML for reading and parsing configuration files
 
+# Add Logging
+import logging
+
+# Set up logging configuration
+logging.basicConfig(
+    filename='app.log',  # Log to a file called 'app.log'
+    level=logging.DEBUG,  # Log detailed information for debugging
+    format='%(asctime)s - %(levelname)s - %(message)s',  # Include timestamp and log level
+)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -57,6 +69,71 @@ SF_CONSUMER_SECRET = secrets["salesforce"]["SF_CONSUMER_SECRET"]
 # OpenAI API key from secrets
 OPENAI_API_KEY = secrets["openai"]["api_key"]
 
+
+def check_password():
+    """Returns `True` if the user had a correct password."""
+    
+    # Initialize session state variables
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "username" not in st.session_state:
+        st.session_state.username = ""
+    if "password" not in st.session_state:
+        st.session_state.password = ""
+    if "submit_clicked" not in st.session_state:
+        st.session_state.submit_clicked = False
+
+    def login():
+        st.session_state.submit_clicked = True
+
+    if st.session_state.authenticated:
+        return True
+
+    # Input placeholders for email and password
+    email_placeholder = st.empty()
+    password_placeholder = st.empty()
+    submit_placeholder = st.empty()
+
+    email = email_placeholder.text_input("Email", key="email_input", value=st.session_state.username)
+    password = password_placeholder.text_input("Password", type="password", key="password_input", value=st.session_state.password)
+    submit_button = submit_placeholder.button("Login", on_click=login)
+
+    if st.session_state.submit_clicked:
+        try:
+            logging.debug(f"Login attempt for email: {email}")
+            
+            # Check if the email exists in the secrets file
+            if email in st.secrets["credentials"]["usernames"]:
+                stored_password = st.secrets["credentials"]["passwords"][email]
+                logging.debug(f"Stored password for {email}: {stored_password}")
+                
+                # Verify the password by comparing directly
+                if password == stored_password:
+                    st.session_state.authenticated = True
+                    st.session_state.username = email
+                    st.session_state.password = ""
+                    
+                    # Clear input placeholders after successful login
+                    email_placeholder.empty()
+                    password_placeholder.empty()
+                    submit_placeholder.empty()
+                    
+                    logging.info(f"User {email} successfully logged in.")
+                    return True
+                else:
+                    st.error("😕 Incorrect password")
+                    logging.warning(f"Incorrect password attempt for {email}")
+            else:
+                st.error("😕 User not found")
+                logging.warning(f"Login attempt with non-existent user: {email}")
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            logging.error(f"Error during login attempt for {email}: {str(e)}", exc_info=True)
+        
+        st.session_state.submit_clicked = False
+        return False
+
+    return False
 
 def connect_to_salesforce():
     """
@@ -1045,377 +1122,197 @@ def MQLDistributionByCampaignCard(df):
     campaign_distribution.columns = ["Campaign", "Count"]
     return px.bar(campaign_distribution, x="Campaign", y="Count", title="MQL Distribution by Campaign")
 
-
 def main():
     """
     Main function to run the Streamlit application.
     """
 
-    # Sidebar for navigation
-    with st.sidebar:
+    # First, check if the user is authenticated before proceeding to the main dashboard
+    if check_password():
+        # Sidebar for navigation
+        with st.sidebar:
+            st.markdown("### Select Business Vertical")
+            vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
 
-        st.markdown("### Select Business Vertical")
-        vertical = st.selectbox("Choose", ("Protestant (Default)", "Catholic", "Protection", "Non-Profit"))
+            st.markdown("### Select Report")
+            report_type = st.radio("Choose Report Type", ("Orders", "Lead Source Pipeline (MQLs)"))
 
-        st.markdown("### Select Report")
-        report_type = st.radio("Choose Report Type", ("Orders", "Lead Source Pipeline (MQLs)"))
+        # Main dashboard title
+        st.title("Salesforce Data Dashboard")
 
-    # Main dashboard title
-    st.title("Salesforce Data Dashboard")
+        # Date range selection
+        col1, col2 = st.columns(2)
+        with col1:
+            date_option = st.selectbox(
+                "Select Date Range",
+                (
+                    "Month to Date (Current Month)",
+                    "Last 7 days",
+                    "Last Month",
+                    "Last 3 months",
+                    "Last 6 months",
+                    "Last 12 months",
+                    "Year to Date",
+                    "Custom",
+                ),
+            )
 
-    # Date range selection
-    col1, col2 = st.columns(2)
-    with col1:
-        date_option = st.selectbox(
-            "Select Date Range",
-            (
-                "Month to Date (Current Month)",
-                "Last 7 days",
-                "Last Month",
-                "Last 3 months",
-                "Last 6 months",
-                "Last 12 months",
-                "Year to Date",
-                "Custom",
-            ),
-        )
+            if date_option == "Custom":
+                start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=90))
+                end_date = st.date_input("End Date", value=datetime.now())
+            elif date_option == "Year to Date":
+                start_date = datetime(datetime.now().year, 1, 1)
+                end_date = datetime.now()
+            elif date_option == "Month to Date (Current Month)":
+                start_date = datetime.now().replace(day=1)
+                end_date = datetime.now()
+            elif date_option == "Last Month":
+                today = datetime.now()
+                last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+                last_month_end = today.replace(day=1) - timedelta(days=1)
+                start_date = last_month_start
+                end_date = last_month_end
+            else:
+                end_date = datetime.now()
+                start_date_map = {"Last 7 days": 7, "Last 3 months": 90, "Last 6 months": 180, "Last 12 months": 365}
+                start_date = end_date - timedelta(days=start_date_map[date_option])
 
-        if date_option == "Custom":
-            start_date = st.date_input("Start Date", value=datetime.now() - timedelta(days=90))
-            end_date = st.date_input("End Date", value=datetime.now())
-        elif date_option == "Year to Date":
-            start_date = datetime(datetime.now().year, 1, 1)
-            end_date = datetime.now()
-        elif date_option == "Month to Date (Current Month)":
-            start_date = datetime.now().replace(day=1)
-            end_date = datetime.now()
-        elif date_option == "Last Month":
-            today = datetime.now()
-            last_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
-            last_month_end = today.replace(day=1) - timedelta(days=1)
-            start_date = last_month_start
-            end_date = last_month_end
-        else:
-            end_date = datetime.now()
-            start_date_map = {"Last 7 days": 7, "Last 3 months": 90, "Last 6 months": 180, "Last 12 months": 365}
-            start_date = end_date - timedelta(days=start_date_map[date_option])
+        # Fetch and display data on button click
+        if st.button("Fetch Data"):
+            with st.spinner("Fetching data from Salesforce..."):
+                sf = connect_to_salesforce()
+                if not sf:
+                    return
 
-    if st.button("Fetch Data"):
-        with st.spinner("Fetching data from Salesforce..."):
-            sf = connect_to_salesforce()
-            if not sf:
-                return
+                # Handle Orders report
+                if report_type == "Orders":
+                    df = fetch_salesforce_data(sf, start_date, end_date)
+                    wicked_reports_df = fetch_wicked_reports_data(sf, start_date, end_date)
 
-            if report_type == "Orders":
-                df = fetch_salesforce_data(sf, start_date, end_date)
-                wicked_reports_df = fetch_wicked_reports_data(sf, start_date, end_date)
+                    if df.empty:
+                        st.warning("No data found for the selected date range.")
+                    else:
+                        processed_df = process_data(df)
+                        processed_df = calculate_cltv(processed_df)
+                        product_adoption = calculate_product_adoption(processed_df)
 
-                if df.empty:
-                    st.warning("No data found for the selected date range.")
-                else:
-                    processed_df = process_data(df)
-                    processed_df = calculate_cltv(processed_df)
-                    product_adoption = calculate_product_adoption(processed_df)
+                        # Display key metrics and visualizations
+                        if not product_adoption.empty:
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Orders", len(processed_df))
+                            with col2:
+                                if "ORDERTOTAL" in processed_df.columns:
+                                    total_revenue = processed_df["ORDERTOTAL"].sum()
+                                    st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                                else:
+                                    st.metric("Total Revenue", "N/A")
+                            with col3:
+                                if "ORDERTOTAL" in processed_df.columns:
+                                    avg_order_value = processed_df["ORDERTOTAL"].mean()
+                                    st.metric("Average Order Value", f"${avg_order_value:,.2f}")
+                                else:
+                                    st.metric("Average Order Value", "N/A")
 
-                    # Display key metrics and visualizations
-                    if not product_adoption.empty:
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Orders", len(processed_df))
-                        with col2:
-                            if "ORDERTOTAL" in processed_df.columns:
-                                total_revenue = processed_df["ORDERTOTAL"].sum()
-                                st.metric("Total Revenue", f"${total_revenue:,.2f}")
-                            else:
-                                st.metric("Total Revenue", "N/A")
-                        with col3:
-                            if "ORDERTOTAL" in processed_df.columns:
-                                avg_order_value = processed_df["ORDERTOTAL"].mean()
-                                st.metric("Average Order Value", f"${avg_order_value:,.2f}")
-                            else:
-                                st.metric("Average Order Value", "N/A")
-
-                        # Corrected Orders by State visualization
-                        state_counts = processed_df["CUSTOMERSTATE"].value_counts().reset_index()
-                        state_counts.columns = ["State", "Order Count"]
-                        st.plotly_chart(
-                            px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
-                            use_container_width=True,
-                        )
-
-                        # Orders by Product Category (Pie Chart)
-                        category_counts = processed_df["Product_Category__c"].value_counts().reset_index()
-                        category_counts.columns = ["Product Category", "Order Count"]
-                        st.plotly_chart(
-                            px.pie(
-                                category_counts,
-                                values="Order Count",
-                                names="Product Category",
-                                title="Orders by Product Category (Amplify)",
-                            ),
-                            use_container_width=True,
-                        )
-
-                        window = {
-                            "Last 7 days": 7,
-                            "Last Month": 14,
-                            "Last 3 months": 30,
-                            "Last 6 months": 45,
-                            "Last 12 months": 60,
-                            "Year to Date": 60,
-                        }.get(date_option, 7)
-                        trend_type = (
-                            "monthly"
-                            if date_option in ["Last 3 months", "Last 6 months", "Last 12 months", "Year to Date"]
-                            else "daily"
-                        )
-
-                        # Convert ORDERDATETIME to monthly periods without dropping timezone
-                        if trend_type == "monthly":
-                            processed_df["ORDERDATETIME"] = (
-                                processed_df["ORDERDATETIME"].dt.tz_localize(None).dt.to_period("M").dt.to_timestamp()
+                            # Orders by State visualization
+                            state_counts = processed_df["CUSTOMERSTATE"].value_counts().reset_index()
+                            state_counts.columns = ["State", "Order Count"]
+                            st.plotly_chart(
+                                px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
+                                use_container_width=True,
                             )
-                        else:
-                            processed_df["ORDERDATETIME"] = processed_df["ORDERDATETIME"].dt.tz_convert(
-                                None
-                            )  # Remove timezone for daily data
 
-                        fig_daily = go.Figure()
-                        fig_daily.add_trace(
-                            go.Scatter(
-                                x=processed_df["ORDERDATETIME"],
-                                y=processed_df["ORDERTOTAL"],
-                                mode="lines",
-                                name=f"{trend_type.capitalize()} Total",
+                            # Orders by Product Category (Pie Chart)
+                            category_counts = processed_df["Product_Category__c"].value_counts().reset_index()
+                            category_counts.columns = ["Product Category", "Order Count"]
+                            st.plotly_chart(
+                                px.pie(
+                                    category_counts,
+                                    values="Order Count",
+                                    names="Product Category",
+                                    title="Orders by Product Category (Amplify)",
+                                ),
+                                use_container_width=True,
                             )
-                        )
-                        fig_daily.add_trace(
-                            go.Scatter(
-                                x=processed_df["ORDERDATETIME"],
-                                y=apply_moving_average(processed_df["ORDERTOTAL"], window),
-                                mode="lines",
-                                name=f"{window}-day Moving Average",
+
+                            # Display product adoption and other visualizations
+                            st.plotly_chart(
+                                px.line(
+                                    product_adoption,
+                                    x="OrderMonth",
+                                    y="AdoptionRate",
+                                    color="PRODUCTNAME",
+                                    title="Amplify Product Adoption Rates Over Time",
+                                ).update_layout(legend_title_text="Amplify Products"),
+                                use_container_width=True,
                             )
-                        )
-                        fig_daily.update_layout(title="Order Totals", xaxis_title="Date", yaxis_title="Order Total")
-                        st.plotly_chart(fig_daily, use_container_width=True)
 
-                        # Order Frequency Heatmap
-                        processed_df["DayOfWeek"] = processed_df["ORDERDATETIME"].dt.dayofweek
-                        processed_df["HourOfDay"] = processed_df["ORDERDATETIME"].dt.hour
-                        heatmap_data = processed_df.groupby(["DayOfWeek", "HourOfDay"]).size().unstack(fill_value=0)
-                        heatmap_data = (
-                            heatmap_data.reindex(range(7), fill_value=0, axis=0)
-                            .reindex(range(24), fill_value=0, axis=1)
-                            .sort_index()
-                        )
-                        st.plotly_chart(
-                            px.imshow(
-                                heatmap_data,
-                                labels=dict(x="Hour of Day", y="Day of Week", color="Order Count"),
-                                x=list(range(24)),
-                                y=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-                                aspect="auto",
-                            ).update_layout(title="Order Frequency Heatmap"),
-                            use_container_width=True,
-                        )
+                            # Display data table
+                            st.subheader("Salesforce Data Table")
+                            st.dataframe(processed_df)
 
-                        # Product Adoption Rate for Amplify Products
-                        st.plotly_chart(
-                            px.line(
-                                product_adoption,
-                                x="OrderMonth",
-                                y="AdoptionRate",
-                                color="PRODUCTNAME",
-                                title="Amplify Product Adoption Rates Over Time",
-                            ).update_layout(legend_title_text="Amplify Products"),
-                            use_container_width=True,
-                        )
-
-                        # Display the data table
-                        st.subheader("Salesforce Data Table")
-                        st.dataframe(processed_df)
-
-                        # Export button for complete data
-                        complete_csv = processed_df.to_csv(index=False)
-                        st.download_button(
-                            label="Download Complete CSV",
-                            data=complete_csv,
-                            file_name="salesforce_export.csv",
-                            mime="text/csv",
-                        )
-
-                        # Prepare and export Wicked Reports data
-                        if not wicked_reports_df.empty:
-                            wicked_df = prepare_wicked_reports_export(wicked_reports_df)
-
-                            # Display Wicked Reports data table for verification
-                            st.subheader("Wicked Reports Data Table")
-                            st.dataframe(wicked_df)
-
-                            # Wicked Reports download button
-                            wicked_csv = wicked_df.to_csv(index=False)
+                            # CSV download buttons
+                            complete_csv = processed_df.to_csv(index=False)
                             st.download_button(
-                                label="Download Wicked Reports CSV",
-                                data=wicked_csv,
-                                file_name="wicked_reports_export.csv",
+                                label="Download Complete CSV",
+                                data=complete_csv,
+                                file_name="salesforce_export.csv",
                                 mime="text/csv",
                             )
-                        else:
-                            st.warning("No data available for Wicked Reports export.")
 
-            if report_type == "Lead Source Pipeline (MQLs)":
-                df = fetch_mql_data(sf, start_date, end_date)
-                campaign_df = fetch_campaign_data(sf, start_date, end_date)
-                
-                if vertical == "Protestant (Default)":
-                    df = df[df["Product_Interest__c"] == "Amplify"]
-
-                if df.empty:
-                    st.warning("No MQL data found for the selected date range.")
-                else:
-                    df = process_mql_data(df)
-
-                    st.subheader("MQL Dashboard")
-
-                    # Calculate metrics
-                    total_mqls = len(df)
-                    avg_lead_age = df["LeadAge"].mean()
-
-                    # Create layout
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("How many MQLs did we generate?", total_mqls)
-
-                        # MQLs by month
-                        df["Month"] = df["CreatedDate"].dt.tz_localize(None).dt.to_period("M")
-                        monthly_mqls = df.groupby("Month").size().reset_index(name="Count")
-                        monthly_mqls["Month"] = monthly_mqls["Month"].astype(str)
-                        st.plotly_chart(px.bar(monthly_mqls, x="Month", y="Count", title="MQLs by month"))
-
-                        # MQLs by Status
-                        if "Status__c" in df.columns:
-                            status_counts = df["Status__c"].value_counts()
-                            fig = go.Figure(
-                                data=[go.Pie(labels=status_counts.index, values=status_counts.values, hole=0.3)]
-                            )
-                            fig.update_layout(title="MQLs by Status")
-                            st.plotly_chart(fig)
-                        else:
-                            st.warning("Status information is not available in the dataset.")
-
-                        # Top Campaigns
-                        st.subheader("Top Campaigns")
-                        fig_campaigns = create_top_campaigns_chart(df, campaign_df)
-                        st.plotly_chart(fig_campaigns, use_container_width=True)
-
-                    with col2:
-                        st.metric("What's the average new lead to MQL age?", f"{avg_lead_age:.1f} days")
-
-                        # How many MQLs converted?
-                        converted_df = df[df["Converted_to_Opportunity__c"] == True]  # Fixed line
-                        conversions = (
-                            converted_df.groupby(converted_df["CreatedDate"].dt.tz_localize(None).dt.to_period("M"))
-                            .size()
-                            .reset_index(name="Count")
-                        )
-                        conversions["Month"] = conversions["CreatedDate"].astype(str)
-                        st.plotly_chart(px.bar(conversions, x="Month", y="Count", title="How many MQLs converted?"))
-
-                        # MQLs vs Target for the selected period
-                        target, mql_count, period_name = calculate_target_and_mql_count(
-                            df, date_option, start_date, end_date
-                        )
-
-                        fig = go.Figure(
-                            go.Indicator(
-                                mode="gauge+number+delta",
-                                value=mql_count,
-                                number={"suffix": " MQLs", "font": {"color": text_color}},  # Text color from config
-                                delta={
-                                    "reference": target,
-                                    "relative": True,
-                                    "valueformat": ".1%",
-                                    "font": {"color": primary_color},  # Using primary color for the delta change
-                                },
-                                domain={"x": [0, 1], "y": [0, 1]},
-                                title={
-                                    "text": f"MQLs This {period_name} vs Target ({target:.0f})",
-                                    "font": {"size": 24, "color": text_color},  # Text color for title
-                                },
-                                gauge={
-                                    "axis": {"range": [None, target * 1.5], "tickwidth": 1, "tickcolor": text_color},
-                                    "bar": {"color": "rgba(0, 0, 0, 0)"},  # Transparent bar
-                                    "steps": [
-                                        {"range": [0, target * 0.5], "color": "rgb(255, 85, 85)"},  # Red
-                                        {"range": [target * 0.5, target * 0.75], "color": "rgb(255, 195, 0)"},  # Yellow
-                                        {"range": [target * 0.75, target], "color": "rgb(255, 255, 85)"},  # Light yellow
-                                        {"range": [target, target * 1.5], "color": "rgb(75, 192, 192)"},  # Green
-                                    ],
-                                    "threshold": {
-                                        "line": {"color": text_color, "width": 4},
-                                        "thickness": 0.75,
-                                        "value": target,
-                                    },
-                                },
-                            )
-                        )
-
-                        fig.update_layout(
-                            height=400,
-                            font={"color": text_color, "family": "Arial"},
-                            paper_bgcolor=background_color,
-                            plot_bgcolor=background_color,
-                        )
-
-                        st.plotly_chart(fig)
-
-                    with col3:
-                        # Sales Velocity Funnel
-                        st.subheader("Sales Velocity Funnel")
-                        velocity_data = calculate_velocity(sf, start_date, end_date)
-                        fig_funnel = create_velocity_funnel(velocity_data)
-                        st.plotly_chart(fig_funnel, use_container_width=True)
-
-                        # Median and Average days from MQL to SQL
-                        if "MQL_Converted_Date__c" in df.columns:
-                            df["DaysToSQL"] = (df["MQL_Converted_Date__c"] - df["CreatedDate"]).dt.total_seconds() / (
-                                24 * 60 * 60
-                            )
-                            median_days_to_sql = df["DaysToSQL"].median()
-                            avg_days_to_sql = df["DaysToSQL"].mean()
-
-                            fig = go.Figure()
-                            fig.add_trace(
-                                go.Indicator(
-                                    mode="number+delta",
-                                    value=median_days_to_sql,
-                                    title={"text": "Median Days from MQL to SQL"},
-                                    domain={"y": [0, 0.5], "x": [0, 1]},
+                            if not wicked_reports_df.empty:
+                                wicked_df = prepare_wicked_reports_export(wicked_reports_df)
+                                st.subheader("Wicked Reports Data Table")
+                                st.dataframe(wicked_df)
+                                wicked_csv = wicked_df.to_csv(index=False)
+                                st.download_button(
+                                    label="Download Wicked Reports CSV",
+                                    data=wicked_csv,
+                                    file_name="wicked_reports_export.csv",
+                                    mime="text/csv",
                                 )
-                            )
-                            fig.add_trace(
-                                go.Indicator(
-                                    mode="number+delta",
-                                    value=avg_days_to_sql,
-                                    title={"text": "Average Days from MQL to SQL"},
-                                    domain={"y": [0.5, 1], "x": [0, 1]},
-                                )
-                            )
-                            fig.update_layout(title="MQL to SQL Conversion Time")
-                            st.plotly_chart(fig)
-                        else:
-                            st.warning("MQL to SQL conversion time information is not available in the dataset.")
+                            else:
+                                st.warning("No data available for Wicked Reports export.")
 
-                    st.subheader("MQL Data Table")
-                    st.dataframe(df)
-                    st.download_button(
-                        label="Download MQL CSV",
-                        data=df.to_csv(index=False),
-                        file_name="mql_export.csv",
-                        mime="text/csv",
-                    )
+                # Handle Lead Source Pipeline (MQLs) report
+                if report_type == "Lead Source Pipeline (MQLs)":
+                    df = fetch_mql_data(sf, start_date, end_date)
+                    campaign_df = fetch_campaign_data(sf, start_date, end_date)
 
+                    if vertical == "Protestant (Default)":
+                        df = df[df["Product_Interest__c"] == "Amplify"]
+
+                    if df.empty:
+                        st.warning("No MQL data found for the selected date range.")
+                    else:
+                        df = process_mql_data(df)
+                        st.subheader("MQL Dashboard")
+
+                        # Display MQL metrics and charts
+                        total_mqls = len(df)
+                        avg_lead_age = df["LeadAge"].mean()
+
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("How many MQLs did we generate?", total_mqls)
+                        with col2:
+                            st.metric("What's the average new lead to MQL age?", f"{avg_lead_age:.1f} days")
+                        with col3:
+                            target, mql_count, period_name = calculate_target_and_mql_count(df, date_option, start_date, end_date)
+                            st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
+
+                        # Display MQL conversions, lead source performance, and MQL trend over time
+                        st.plotly_chart(LeadSourcePerformanceCard(df))
+                        st.plotly_chart(MQLTrendOverTimeCard(df))
+
+                        st.subheader("MQL Data Table")
+                        st.dataframe(df)
+                        st.download_button(
+                            label="Download MQL CSV",
+                            data=df.to_csv(index=False),
+                            file_name="mql_export.csv",
+                            mime="text/csv",
+                        )
 
 if __name__ == "__main__":
     main()

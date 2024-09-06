@@ -11,3 +11,5 @@ dspy
 toml
 black
 flake8
+passlib
+bcrypt
