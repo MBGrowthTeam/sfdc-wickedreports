@@ -1,0 +1,10 @@
+[theme]
+primaryColor = "#3F8EFC"                 # Calming blue for primary elements.
+backgroundColor = "#FFFFFF"               # White background for clear readability.
+secondaryBackgroundColor = "#F4F6F8"      # Light gray to separate secondary areas.
+textColor = "#333333"                     # Dark text for optimal contrast on white.
+font = "sans serif"                       # Use modern, clean sans-serif fonts.
+
+[client]
+showErrorDetails = false
+toolbarMode = "minimal"

@@ -2010,87 +2010,94 @@ def main():
 
                             # Check if processed_dataframe is None (no CLTV data)
                             if processed_dataframe is not None:
-                                product_adoption = calculate_product_adoption(processed_dataframe)
-
                                 # Display key metrics and visualizations
-                                if not product_adoption.empty:
-                                    column1, column2, column3 = st.columns(3)
-                                    with column1:
-                                        st.metric("Total Orders", len(processed_dataframe))
-                                    with column2:
-                                        if "ORDERTOTAL" in processed_dataframe.columns:
-                                            total_revenue = processed_dataframe["ORDERTOTAL"].sum()
-                                            st.metric("Total Revenue", f"${total_revenue:,.2f}")
-                                        else:
-                                            st.metric("Total Revenue", "N/A")
-                                    with column3:
-                                        if "ORDERTOTAL" in processed_dataframe.columns:
-                                            average_order_value = processed_dataframe["ORDERTOTAL"].mean()
-                                            st.metric("Average Order Value", f"${average_order_value:,.2f}")
-                                        else:
-                                            st.metric("Average Order Value", "N/A")
+                                column1, column2, column3 = st.columns(3)
+                                with column1:
+                                    st.metric("Total Orders", len(processed_dataframe))
+                                with column2:
+                                    if "ORDERTOTAL" in processed_dataframe.columns:
+                                        total_revenue = processed_dataframe["ORDERTOTAL"].sum()
+                                        st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                                    else:
+                                        st.metric("Total Revenue", "N/A")
+                                with column3:
+                                    if "ORDERTOTAL" in processed_dataframe.columns:
+                                        average_order_value = processed_dataframe["ORDERTOTAL"].mean()
+                                        st.metric("Average Order Value", f"${average_order_value:,.2f}")
+                                    else:
+                                        st.metric("Average Order Value", "N/A")
 
-                                    # Orders by State visualization
-                                    state_counts = processed_dataframe["CUSTOMERSTATE"].value_counts().reset_index()
-                                    state_counts.columns = ["State", "Order Count"]
-                                    st.plotly_chart(
-                                        px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
-                                        use_container_width=True,
-                                    )
+                                # Orders by State visualization
+                                state_counts = processed_dataframe["CUSTOMERSTATE"].value_counts().reset_index()
+                                state_counts.columns = ["State", "Order Count"]
+                                st.plotly_chart(
+                                    px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
+                                    use_container_width=True,
+                                )
 
-                                    # Orders by Product Category (Pie Chart)
-                                    category_counts = processed_dataframe["Product_Category__c"].value_counts().reset_index()
-                                    category_counts.columns = ["Product Category", "Order Count"]
-                                    st.plotly_chart(
-                                        px.pie(
-                                            category_counts,
-                                            values="Order Count",
-                                            names="Product Category",
-                                            title=f"Orders by Product Category ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
-                                        ),
-                                        use_container_width=True,
-                                    )
+                                # Orders by Product Category (Pie Chart)
+                                category_counts = processed_dataframe["Product_Category__c"].value_counts().reset_index()
+                                category_counts.columns = ["Product Category", "Order Count"]
+                                st.plotly_chart(
+                                    px.pie(
+                                        category_counts,
+                                        values="Order Count",
+                                        names="Product Category",
+                                        title=f"Orders by Product Category ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
+                                    ),
+                                    use_container_width=True,
+                                )
 
-                                    # Display product adoption and other visualizations
-                                    st.plotly_chart(
-                                        px.line(
-                                            product_adoption,
-                                            x="OrderMonth",
-                                            y="AdoptionRate",
-                                            color="PRODUCTNAME",
-                                            title=f"Product Adoption Rates Over Time ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
-                                        ).update_layout(legend_title_text=f"{selected_brand if selected_brand != 'ALL' else selected_vertical} Products"),
-                                        use_container_width=True,
-                                    )
+                                # Product Adoption Chart Section
+                                st.markdown(f'<h3 style="font-family: \'Open Sans\', sans-serif; font-size: 14px; font-weight: 600; margin-bottom: 10px;">Product Adoption Rates Over Time ({selected_brand if selected_brand != "ALL" else selected_vertical})</h3>', unsafe_allow_html=True)
+                                
+                                # Check if the date range is at least 3 months
+                                date_difference = (end_date - start_date).days
+                                if date_difference >= 90:  # Approximately 3 months
+                                    product_adoption = calculate_product_adoption(processed_dataframe)
 
-                                    # Display data table
-                                    st.subheader("Salesforce Data Table")
-                                    st.dataframe(processed_dataframe)
+                                    # Display product adoption chart
+                                    if not product_adoption.empty:
+                                        st.plotly_chart(
+                                            px.line(
+                                                product_adoption,
+                                                x="OrderMonth",
+                                                y="AdoptionRate",
+                                                color="PRODUCTNAME",
+                                            ).update_layout(legend_title_text=f"{selected_brand if selected_brand != 'ALL' else selected_vertical} Products"),
+                                            use_container_width=True,
+                                        )
+                                else:
+                                    st.warning("Please select a date range of at least 3 months to view data.")
 
-                                    # CSV download buttons
-                                    complete_csv = processed_dataframe.to_csv(index=False)
+                                # Display data table
+                                st.subheader("Salesforce Data Table")
+                                st.dataframe(processed_dataframe)
+
+                                # CSV download buttons
+                                complete_csv = processed_dataframe.to_csv(index=False)
+                                st.download_button(
+                                    label="Download Complete CSV",
+                                    data=complete_csv,
+                                    file_name="salesforce_export.csv",
+                                    mime="text/csv",
+                                )
+
+                                if not wicked_reports_dataframe.empty:
+                                    wicked_dataframe = prepare_wicked_reports_export(wicked_reports_dataframe)
+                                    st.subheader("Wicked Reports Data Table")
+                                    st.dataframe(wicked_dataframe)
+                                    wicked_csv = wicked_dataframe.to_csv(index=False)
                                     st.download_button(
-                                        label="Download Complete CSV",
-                                        data=complete_csv,
-                                        file_name="salesforce_export.csv",
+                                        label="Download Wicked Reports CSV",
+                                        data=wicked_csv,
+                                        file_name="wicked_reports_export.csv",
                                         mime="text/csv",
                                     )
-
-                                    if not wicked_reports_dataframe.empty:
-                                        wicked_dataframe = prepare_wicked_reports_export(wicked_reports_dataframe)
-                                        st.subheader("Wicked Reports Data Table")
-                                        st.dataframe(wicked_dataframe)
-                                        wicked_csv = wicked_dataframe.to_csv(index=False)
-                                        st.download_button(
-                                            label="Download Wicked Reports CSV",
-                                            data=wicked_csv,
-                                            file_name="wicked_reports_export.csv",
-                                            mime="text/csv",
-                                        )
-                                    else:
-                                        st.warning("No data available for Wicked Reports export.")
+                                else:
+                                    st.warning("No data available for Wicked Reports export.")
                             else:
-                                st.warning("Unable to calculate CLTV, skipping product adoption calculation.")
+                                st.warning("Unable to calculate CLTV.")
 
                     elif report_type == "MQLs":
                         # --- Handling Report Types based on Vertical and Brand ---

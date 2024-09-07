@@ -63,7 +63,7 @@ env.bak/
 venv.bak/
 
 # Streamlit
-.streamlit/
+.streamlit/secrets.toml
 
 # IDEs and editors
 .idea/
@@ -84,7 +84,6 @@ Thumbs.db
 # Project-specific
 *.log
 *.csv
-*.toml
 
 # Ignore local files
 /salesforce_data_export/*
