@@ -308,6 +308,15 @@ def load_sql_query(filename):
                 query_lines.append(line)
         return "".join(query_lines).strip()
 
+def get_brand_id(salesforce, brand_name):
+    # Assuming you have a custom object 'Brand__c' with a 'Name' field
+    query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
+    result = salesforce.query(query)
+    if result['records']:
+        return result['records'][0]['Id']
+    else:
+        return None  # Or handle the case where the brand is not found
+
 def fetch_salesforce_data(sf, start_date, end_date, brand=None):
     """
     Fetch order data from Salesforce within a specified date range,
@@ -1981,7 +1990,18 @@ def main():
                                     st.warning("No data available for Wicked Reports export.")
 
                     elif report_type == "MQLs":
-                        dataframe = fetch_mql_data(salesforce, start_date, end_date, brand=brand_filter)
+                        # --- Handling Report Types based on Vertical and Brand ---
+                        if selected_brand == "ALL":
+                            # Get the Salesforce IDs of all brands in the vertical
+                            brand_filter = [get_brand_id(salesforce, b) for b in available_brands]
+                        else:
+                            # Get the Salesforce ID of the selected brand
+                            brand_filter = [get_brand_id(salesforce, selected_brand)]
+
+                        # Filter out None values from brand_filter
+                        brand_filter = [brand_id for brand_id in brand_filter if brand_id is not None]
+
+                        dataframe = fetch_mql_data(salesforce, start_date, end_date, brand_ids=brand_filter)  # Pass as brand_ids
                         campaign_dataframe = fetch_campaign_data(salesforce, start_date, end_date)
 
                         if dataframe.empty:
@@ -2000,14 +2020,16 @@ def main():
                             with column2:
                                 st.metric("What's the average new lead to MQL age?", f"{average_lead_age:.1f} days")
                             with column3:
-                                target, mql_count, period_name = calculate_target_and_mql_count(dataframe, date_option, start_date, end_date)
+                                target, mql_count, period_name = calculate_target_and_mql_count(
+                                    dataframe, date_option, start_date, end_date
+                                )
                                 st.metric(f"MQLs This {period_name} vs Target", f"{mql_count}/{target}")
 
                             # Enhanced charts and visualizations:
-                            st.plotly_chart(LeadSourcePerformanceCard(dataframe)) 
+                            st.plotly_chart(LeadSourcePerformanceCard(dataframe))
                             st.plotly_chart(MQLTrendOverTimeCard(dataframe))
-                            st.plotly_chart(TimeToSQLCard(dataframe)) 
-                            st.plotly_chart(MQLFunnelCard(dataframe))  
+                            st.plotly_chart(TimeToSQLCard(dataframe))
+                            st.plotly_chart(MQLFunnelCard(dataframe))
 
                             st.subheader("MQL Data Table")
                             st.dataframe(dataframe)
