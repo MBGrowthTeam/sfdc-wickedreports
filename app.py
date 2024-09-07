@@ -309,15 +309,14 @@ def load_sql_query(filename):
         return "".join(query_lines).strip()
 
 def get_brand_id(salesforce, brand_name):
-    # Assuming you have a custom object 'Brand__c' with a 'Name' field
     query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
     result = salesforce.query(query)
     if result['records']:
         return result['records'][0]['Id']
     else:
-        return None  # Or handle the case where the brand is not found
+        return None
 
-def fetch_salesforce_data(sf, start_date, end_date, brand=None):
+def fetch_orders_data(sf, start_date, end_date, brand=None):
     """
     Fetch order data from Salesforce within a specified date range,
     optionally filtered by brand.
@@ -336,12 +335,20 @@ def fetch_salesforce_data(sf, start_date, end_date, brand=None):
 
     query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
 
-    # Only apply brand filter if a brand is provided
     if brand: 
-        query += f" AND Order.Brand__c = '{brand}'"
-    query += " ORDER BY Order.CreatedDate"
+        if isinstance(brand, list):  # Check if brand is a list (for "ALL" selection)
+            brand_str = ", ".join([f"'{b}'" for b in brand])  # Format for IN operator
+            query += f" AND Order.Brand__c IN ({brand_str})"
+        else:
+            query += f" AND Order.Brand__c = '{brand}'"
 
     result = sf.query_all(query)
+    
+    # Check if any Orders were found
+    if result['totalSize'] == 0:
+        st.warning(f"No Orders found for {brand if brand else 'ALL'} between {start_date.strftime('%Y-%m-%d')} and {end_date.strftime('%Y-%m-%d')}.")
+        return pd.DataFrame()  # Return an empty DataFrame
+
     orders = pd.DataFrame(result["records"])
 
     # Flatten nested order items data
@@ -357,7 +364,13 @@ def fetch_salesforce_data(sf, start_date, end_date, brand=None):
                 }
             )
 
-    order_items_df = pd.DataFrame(order_items)
+    # Create an empty DataFrame if no OrderItems are found
+    if order_items:
+        order_items_df = pd.DataFrame(order_items)
+    else:
+        order_items_df = pd.DataFrame(columns=['OrderId', 'SBQQ__Subscription__c', 'Product_Category__c', 'ProductName'])
+
+    # Now merge, ensuring all orders are included even if they have no OrderItems
     df = orders.merge(order_items_df, left_on="Id", right_on="OrderId", how="left")
 
     # Clean up the DataFrame
@@ -520,47 +533,66 @@ def fetch_wicked_reports_data(sf, start_date, end_date, brand=None):
         brand: The brand to filter by (optional).
 
     Returns:
-        pd.DataFrame: A Pandas DataFrame containing the fetched order data for Wicked Reports.
+        pd.DataFrame: A Pandas DataFrame containing the fetched order data for Wicked Reports,
+                      or an empty DataFrame if no orders are found or 'Id' is not available.
     """
-    start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
-    end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+    try:
+        start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
+        end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-    query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
+        query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
 
-    if brand:
-        query += f" AND Brand__c = '{brand}'"
-    query += " ORDER BY CreatedDate"
+        if brand:
+            if isinstance(brand, list):  # Check if brand is a list (for "ALL" selection)
+                brand_str = ", ".join([f"'{b}'" for b in brand])  # Format for IN operator
+                query += f" AND Brand__c IN ({brand_str})"
+            else:
+                query += f" AND Brand__c = '{brand}'"
+        query += " ORDER BY CreatedDate"
 
-    result = sf.query_all(query)
-    orders = pd.DataFrame(result["records"])
+        result = sf.query_all(query)
+        orders = pd.DataFrame(result["records"])
 
-    # Flatten the nested OrderItems data
-    order_items = []
-    for order in result["records"]:
-        for item in order.get("OrderItems", {}).get("records", []):
-            order_items.append(
-                {
-                    "OrderId": order["Id"],
-                    "SBQQ__Subscription__c": item.get("SBQQ__Subscription__c"),
-                    "Product2Id": item.get("Product2Id"),
-                    "Product_Name__c": item.get("Product_Name__c"),
-                }
-            )
+        # Check if 'Id' column is present in the 'orders' DataFrame
+        if 'Id' not in orders.columns:
+            st.warning(f"The 'Id' column is not available for brand: {brand}. Skipping Wicked Reports data fetch.")
+            return pd.DataFrame()  # Return an empty DataFrame
 
-    order_items_df = pd.DataFrame(order_items)
+        # Flatten the nested OrderItems data
+        order_items = []
+        for order in orders.to_dict(orient='records'):
+            for item in order.get("OrderItems", {}).get("records", []):
+                order_items.append(
+                    {
+                        "OrderId": order["Id"],
+                        "SBQQ__Subscription__c": item.get("SBQQ__Subscription__c"),
+                        "Product2Id": item.get("Product2Id"),
+                        "Product_Name__c": item.get("Product_Name__c"),
+                    }
+                )
 
-    # Merge orders with order items
-    df = orders.merge(order_items_df, left_on="Id", right_on="OrderId", how="left")
+        # Create an empty DataFrame if no OrderItems are found
+        if order_items:
+            order_items_df = pd.DataFrame(order_items)
+        else:
+            order_items_df = pd.DataFrame(columns=['OrderId', 'SBQQ__Subscription__c', 'Product2Id', 'Product_Name__c'])
 
-    # Clean up the DataFrame
-    df = df.drop(columns=["attributes", "OrderItems"], errors="ignore")
-    df["Time_Zone__c"] = df["Account"].apply(lambda x: x["Time_Zone__c"] if x else None)
-    df["Account_Primary_Contact_Email__c"] = df["Account"].apply(
-        lambda x: x["Account_Primary_Contact_Email__c"] if x else None
-    )
-    df = df.drop(columns=["Account"])
+        # Merge orders with order items using a left join
+        df = orders.merge(order_items_df, left_on="Id", right_on="OrderId", how="left")
 
-    return df
+        # Clean up the DataFrame
+        df = df.drop(columns=["attributes", "OrderItems"], errors="ignore")
+        df["Time_Zone__c"] = df["Account"].apply(lambda x: x["Time_Zone__c"] if isinstance(x, dict) and "Time_Zone__c" in x else None)
+        df["Account_Primary_Contact_Email__c"] = df["Account"].apply(
+            lambda x: x["Account_Primary_Contact_Email__c"] if isinstance(x, dict) and "Account_Primary_Contact_Email__c" in x else None
+        )
+        df = df.drop(columns=["Account"])
+
+        return df
+
+    except Exception as e:
+        st.error(f"An error occurred while fetching Wicked Reports data: {e}")
+        return pd.DataFrame()  # Return an empty DataFrame
 
 
 def prepare_wicked_reports_export(df):
@@ -715,28 +747,6 @@ def export_wicked_report_orders(df):
     wicked_report_df = wicked_report_df[wicked_report_columns]
 
     return wicked_report_df
-
-
-def calculate_cltv(df):
-    """
-    Calculate Customer Lifetime Value (CLTV) for each customer.
-
-    Args:
-        df (pd.DataFrame): The DataFrame containing order data.
-
-    Returns:
-        pd.DataFrame: The DataFrame with an added 'CLTV' column.
-    """
-    customer_orders = df.groupby("CUSTOMEREMAIL")
-    customer_avg_order_value = customer_orders["ORDERTOTAL"].mean()
-    customer_purchase_frequency = customer_orders["ORDERID"].count()
-
-    # Assume 12 months CLTV
-    cltv = customer_avg_order_value * customer_purchase_frequency * 12
-    cltv_df = pd.DataFrame({"CUSTOMEREMAIL": cltv.index, "CLTV": cltv.values})
-
-    return df.merge(cltv_df, on="CUSTOMEREMAIL", how="left")
-
 
 def calculate_product_adoption(dataframe):
     """
@@ -1768,6 +1778,91 @@ def LeadConversionFunnelCard(df):
     fig.update_layout(title="Lead Conversion Funnel")
     return fig
 
+def calculate_cltv(df, time_window_months=12):
+    """
+    Calculate Customer Lifetime Value (CLTV) for each customer over a specified time window.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing order data.
+        time_window_months (int, optional): The time window in months for CLTV calculation. 
+                                           Defaults to 12 months.
+
+    Returns:
+        pd.DataFrame: The DataFrame with added 'CLTV' and 'AVG_ORDER_VALUE' columns, 
+                      or None if no CLTV data can be calculated.
+    """
+    df['ORDERDATETIME'] = pd.to_datetime(df['ORDERDATETIME'])
+
+    if df.empty or 'CUSTOMEREMAIL' not in df.columns or 'ORDERTOTAL' not in df.columns:
+        st.warning("Not enough data to calculate CLTV. Please ensure you have orders with customer emails and order totals.")
+        return None
+
+    # Calculate average order value
+    customer_avg_order_value = df.groupby("CUSTOMEREMAIL")["ORDERTOTAL"].mean()
+
+    # Calculate the time difference between the first and last order for each customer
+    customer_time_diff = df.groupby("CUSTOMEREMAIL")['ORDERDATETIME'].apply(
+        lambda x: (x.max() - x.min()).days
+    )
+
+    # Calculate number of unique orders per customer
+    customer_unique_orders = df.groupby("CUSTOMEREMAIL")['ORDERID'].nunique()
+
+    # Create DataFrame for CLTV
+    cltv_df = pd.DataFrame({
+        "CUSTOMEREMAIL": customer_avg_order_value.index, 
+        "AVG_ORDER_VALUE": customer_avg_order_value.values,
+        "TIME_DIFF": customer_time_diff.values,
+        "UNIQUE_ORDERS": customer_unique_orders.values
+    }).reset_index(drop=True)
+
+    # Calculate purchase frequency, handling zero time difference
+    cltv_df['PURCHASE_FREQUENCY'] = cltv_df.apply(
+        lambda row: row['UNIQUE_ORDERS'] / (row['TIME_DIFF'] / 30) if row['TIME_DIFF'] > 0 else row['UNIQUE_ORDERS'], 
+        axis=1
+    )
+
+    # Calculate CLTV 
+    cltv_df["CLTV"] = cltv_df["AVG_ORDER_VALUE"] * cltv_df["PURCHASE_FREQUENCY"] * time_window_months
+
+    return df.merge(cltv_df, on="CUSTOMEREMAIL", how="left")
+
+def create_cltv_histogram(df):
+    """
+    Creates a histogram to visualize the distribution of CLTV values.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing CLTV data.
+
+    Returns:
+        plotly.graph_objects.Figure: The histogram figure.
+    """
+    fig = px.histogram(df, x="CLTV", title="Customer Lifetime Value (CLTV) Distribution")
+    fig.update_layout(
+        xaxis_title="CLTV",
+        yaxis_title="Number of Customers"
+    )
+    return fig
+
+def create_cltv_by_product_category_chart(df):
+    """
+    Creates a bar chart to show average CLTV by product category.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing CLTV and product category data.
+
+    Returns:
+        plotly.graph_objects.Figure: The bar chart figure.
+    """
+    cltv_by_category = df.groupby('Product_Category__c')['CLTV'].mean().reset_index()
+    fig = px.bar(cltv_by_category, x='Product_Category__c', y='CLTV', 
+                 title='Average CLTV by Product Category')
+    fig.update_layout(
+        xaxis_title="Product Category",
+        yaxis_title="Average CLTV"
+    )
+    return fig
+
 def main():
     """Main function to run the Streamlit application."""
 
@@ -1787,7 +1882,10 @@ def main():
             selected_brand = st.selectbox("Select Brand", ["ALL"] + available_brands)
 
             st.markdown("### Select Report")
-            report_type = st.radio("Choose Report Type", ("Orders", "MQLs", "Leads", "Open Opportunities", "SQL Bench"))
+            report_type = st.radio(
+                "Choose Report Type", 
+                ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "SQL Bench")
+            )
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
@@ -1896,12 +1994,12 @@ def main():
                     # --- Handling Report Types based on Vertical and Brand ---
 
                     if selected_brand == "ALL":
-                        brand_filter = None  # Fetch data for all brands in the vertical
+                        brand_filter = available_brands  # Fetch data for all brands in the vertical
                     else:
                         brand_filter = selected_brand
 
                     if report_type == "Orders":
-                        dataframe = fetch_salesforce_data(salesforce, start_date, end_date, brand=brand_filter)
+                        dataframe = fetch_orders_data(salesforce, start_date, end_date, brand=brand_filter)
                         wicked_reports_dataframe = fetch_wicked_reports_data(salesforce, start_date, end_date, brand=brand_filter)
                         
                         if dataframe.empty:
@@ -1909,85 +2007,90 @@ def main():
                         else:
                             processed_dataframe = process_data(dataframe)
                             processed_dataframe = calculate_cltv(processed_dataframe)
-                            product_adoption = calculate_product_adoption(processed_dataframe)
 
-                            # Display key metrics and visualizations
-                            if not product_adoption.empty:
-                                column1, column2, column3 = st.columns(3)
-                                with column1:
-                                    st.metric("Total Orders", len(processed_dataframe))
-                                with column2:
-                                    if "ORDERTOTAL" in processed_dataframe.columns:
-                                        total_revenue = processed_dataframe["ORDERTOTAL"].sum()
-                                        st.metric("Total Revenue", f"${total_revenue:,.2f}")
-                                    else:
-                                        st.metric("Total Revenue", "N/A")
-                                with column3:
-                                    if "ORDERTOTAL" in processed_dataframe.columns:
-                                        average_order_value = processed_dataframe["ORDERTOTAL"].mean()
-                                        st.metric("Average Order Value", f"${average_order_value:,.2f}")
-                                    else:
-                                        st.metric("Average Order Value", "N/A")
+                            # Check if processed_dataframe is None (no CLTV data)
+                            if processed_dataframe is not None:
+                                product_adoption = calculate_product_adoption(processed_dataframe)
 
-                                # Orders by State visualization
-                                state_counts = processed_dataframe["CUSTOMERSTATE"].value_counts().reset_index()
-                                state_counts.columns = ["State", "Order Count"]
-                                st.plotly_chart(
-                                    px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
-                                    use_container_width=True,
-                                )
+                                # Display key metrics and visualizations
+                                if not product_adoption.empty:
+                                    column1, column2, column3 = st.columns(3)
+                                    with column1:
+                                        st.metric("Total Orders", len(processed_dataframe))
+                                    with column2:
+                                        if "ORDERTOTAL" in processed_dataframe.columns:
+                                            total_revenue = processed_dataframe["ORDERTOTAL"].sum()
+                                            st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                                        else:
+                                            st.metric("Total Revenue", "N/A")
+                                    with column3:
+                                        if "ORDERTOTAL" in processed_dataframe.columns:
+                                            average_order_value = processed_dataframe["ORDERTOTAL"].mean()
+                                            st.metric("Average Order Value", f"${average_order_value:,.2f}")
+                                        else:
+                                            st.metric("Average Order Value", "N/A")
 
-                                # Orders by Product Category (Pie Chart)
-                                category_counts = processed_dataframe["Product_Category__c"].value_counts().reset_index()
-                                category_counts.columns = ["Product Category", "Order Count"]
-                                st.plotly_chart(
-                                    px.pie(
-                                        category_counts,
-                                        values="Order Count",
-                                        names="Product Category",
-                                        title=f"Orders by Product Category ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
-                                    ),
-                                    use_container_width=True,
-                                )
+                                    # Orders by State visualization
+                                    state_counts = processed_dataframe["CUSTOMERSTATE"].value_counts().reset_index()
+                                    state_counts.columns = ["State", "Order Count"]
+                                    st.plotly_chart(
+                                        px.bar(state_counts, x="State", y="Order Count", title="Orders by State"),
+                                        use_container_width=True,
+                                    )
 
-                                # Display product adoption and other visualizations
-                                st.plotly_chart(
-                                    px.line(
-                                        product_adoption,
-                                        x="OrderMonth",
-                                        y="AdoptionRate",
-                                        color="PRODUCTNAME",
-                                        title=f"Product Adoption Rates Over Time ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
-                                    ).update_layout(legend_title_text=f"{selected_brand if selected_brand != 'ALL' else selected_vertical} Products"),
-                                    use_container_width=True,
-                                )
+                                    # Orders by Product Category (Pie Chart)
+                                    category_counts = processed_dataframe["Product_Category__c"].value_counts().reset_index()
+                                    category_counts.columns = ["Product Category", "Order Count"]
+                                    st.plotly_chart(
+                                        px.pie(
+                                            category_counts,
+                                            values="Order Count",
+                                            names="Product Category",
+                                            title=f"Orders by Product Category ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
+                                        ),
+                                        use_container_width=True,
+                                    )
 
-                                # Display data table
-                                st.subheader("Salesforce Data Table")
-                                st.dataframe(processed_dataframe)
+                                    # Display product adoption and other visualizations
+                                    st.plotly_chart(
+                                        px.line(
+                                            product_adoption,
+                                            x="OrderMonth",
+                                            y="AdoptionRate",
+                                            color="PRODUCTNAME",
+                                            title=f"Product Adoption Rates Over Time ({selected_brand if selected_brand != 'ALL' else selected_vertical})",
+                                        ).update_layout(legend_title_text=f"{selected_brand if selected_brand != 'ALL' else selected_vertical} Products"),
+                                        use_container_width=True,
+                                    )
 
-                                # CSV download buttons
-                                complete_csv = processed_dataframe.to_csv(index=False)
-                                st.download_button(
-                                    label="Download Complete CSV",
-                                    data=complete_csv,
-                                    file_name="salesforce_export.csv",
-                                    mime="text/csv",
-                                )
+                                    # Display data table
+                                    st.subheader("Salesforce Data Table")
+                                    st.dataframe(processed_dataframe)
 
-                                if not wicked_reports_dataframe.empty:
-                                    wicked_dataframe = prepare_wicked_reports_export(wicked_reports_dataframe)
-                                    st.subheader("Wicked Reports Data Table")
-                                    st.dataframe(wicked_dataframe)
-                                    wicked_csv = wicked_dataframe.to_csv(index=False)
+                                    # CSV download buttons
+                                    complete_csv = processed_dataframe.to_csv(index=False)
                                     st.download_button(
-                                        label="Download Wicked Reports CSV",
-                                        data=wicked_csv,
-                                        file_name="wicked_reports_export.csv",
+                                        label="Download Complete CSV",
+                                        data=complete_csv,
+                                        file_name="salesforce_export.csv",
                                         mime="text/csv",
                                     )
-                                else:
-                                    st.warning("No data available for Wicked Reports export.")
+
+                                    if not wicked_reports_dataframe.empty:
+                                        wicked_dataframe = prepare_wicked_reports_export(wicked_reports_dataframe)
+                                        st.subheader("Wicked Reports Data Table")
+                                        st.dataframe(wicked_dataframe)
+                                        wicked_csv = wicked_dataframe.to_csv(index=False)
+                                        st.download_button(
+                                            label="Download Wicked Reports CSV",
+                                            data=wicked_csv,
+                                            file_name="wicked_reports_export.csv",
+                                            mime="text/csv",
+                                        )
+                                    else:
+                                        st.warning("No data available for Wicked Reports export.")
+                            else:
+                                st.warning("Unable to calculate CLTV, skipping product adoption calculation.")
 
                     elif report_type == "MQLs":
                         # --- Handling Report Types based on Vertical and Brand ---
@@ -2112,6 +2215,43 @@ def main():
                                 file_name="open_opportunities_export.csv",
                                 mime="text/csv",
                             )
+
+                    elif report_type == "Customer Lifetime Value":
+                        dataframe = fetch_orders_data(salesforce, start_date, end_date, brand=brand_filter)
+
+                        if dataframe.empty:
+                            st.warning("No data found for the selected date range.")
+                        else:
+                            processed_dataframe = process_data(dataframe)
+                            cltv_df = calculate_cltv(processed_dataframe)
+
+                            # Check if cltv_df is None
+                            if cltv_df is not None:
+                                st.subheader("Customer Lifetime Value")
+
+                                # Display CLTV metrics
+                                avg_cltv = cltv_df["CLTV"].mean()
+                                st.metric("Average CLTV", f"${avg_cltv:,.2f}")
+
+                                # Display CLTV histogram
+                                st.plotly_chart(create_cltv_histogram(cltv_df), use_container_width=True)
+
+                                # Display CLTV by product category chart
+                                st.plotly_chart(create_cltv_by_product_category_chart(cltv_df), use_container_width=True)
+
+                                # Display data table
+                                st.dataframe(cltv_df)
+
+                                # CSV download button
+                                cltv_csv = cltv_df.to_csv(index=False)
+                                st.download_button(
+                                    label="Download CLTV Report CSV",
+                                    data=cltv_csv,
+                                    file_name="cltv_report.csv",
+                                    mime="text/csv",
+                                )
+                            else:
+                                st.warning("Unable to calculate CLTV due to insufficient data.") 
 
 if __name__ == "__main__":
     main()
