@@ -17,7 +17,8 @@ SELECT
     SBQQ__Product__r.Family,
     SBQQ__Product__r.Product_Category__c,
     SBQQ__RegularPrice__c,
-    SBQQ__NetPrice__c
+    SBQQ__NetPrice__c,
+    SBQQ__Contract__c  
 FROM SBQQ__Subscription__c 
 WHERE SBQQ__StartDate__c >= {start_date}
 AND SBQQ__StartDate__c <= {end_date}

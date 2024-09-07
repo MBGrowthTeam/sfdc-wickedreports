@@ -11,5 +11,5 @@ Returns:
 SELECT Id, Name, Amount, StageName, CloseDate, LeadSource, CreatedDate
 FROM Opportunity
 WHERE IsClosed = FALSE 
-AND CreatedDate >= {start_date}
-AND CreatedDate <= {end_date}
+AND CloseDate >= {start_date}
+AND CloseDate <= {end_date}

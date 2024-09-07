@@ -1,22 +1,84 @@
 """
-Fetches Order Item data from Salesforce within a specified date range, including
-related Order information. This query leverages the relationship between OrderItem
-and Order objects.
+Fetches Order Item data for a list of Order IDs.
 
 Parameters:
-    start_date (str): Start date for the data range in the format 'YYYY-MM-DDT00:00:00Z'.
-    end_date (str): End date for the data range in the format 'YYYY-MM-DDT23:59:59Z'.
+    {order_ids}: A comma-separated string of Order IDs.
 
 Returns:
-    str: The SOQL query string to fetch Order Item data with related Order details.
+    str: The SOQL query string to fetch Order Item data.
 """
 SELECT 
-    Order.Id,
-    Order.Brand__c,
-    Order.CreatedDate,
-    OrderItem.SBQQ__Subscription__c, 
-    OrderItem.Product2Id, 
-    OrderItem.Product_Category__c,
-    OrderItem.Product_Name__c
-FROM OrderItem
-WHERE Order.CreatedDate >= {start_date} AND Order.CreatedDate <= {end_date}
+    Id,
+    Product2Id,
+    IsDeleted,
+    OrderId,
+    PricebookEntryId,
+    OriginalOrderItemId,
+    AvailableQuantity,
+    Quantity,
+    CurrencyIsoCode,
+    UnitPrice,
+    ListPrice,
+    TotalPrice,
+    ServiceDate,
+    EndDate,
+    Description,
+    CreatedDate,
+    CreatedById,
+    LastModifiedDate,
+    LastModifiedById,
+    SystemModstamp,
+    OrderItemNumber,
+    SBQQ__Activated__c,
+    SBQQ__Asset__c,
+    SBQQ__BillingFrequency__c,
+    SBQQ__BillingType__c,
+    SBQQ__BlockPrice__c,
+    SBQQ__BookingsIndicator__c,
+    SBQQ__BundleRoot__c,
+    SBQQ__ChargeType__c,
+    SBQQ__ContractAction__c,
+    SBQQ__Contract__c,
+    SBQQ__Contracted__c,
+    SBQQ__ContractingMethod__c,
+    SBQQ__DefaultSubscriptionTerm__c,
+    SBQQ__DimensionType__c,
+    SBQQ__DiscountSchedule__c,
+    SBQQ__OrderProductBookings__c,
+    SBQQ__OrderedQuantity__c,
+    SBQQ__PriceDimension__c,
+    SBQQ__PriceSchedule__c,
+    SBQQ__ProrateMultiplier__c,
+    SBQQ__QuoteLine__c,
+    SBQQ__QuotedListPrice__c,
+    SBQQ__QuotedQuantity__c,
+    SBQQ__RequiredBy__c,
+    SBQQ__RevisedOrderProduct__c,
+    SBQQ__SegmentIndex__c,
+    SBQQ__SegmentKey__c,
+    SBQQ__ShippingAccount__c,
+    SBQQ__Status__c,
+    SBQQ__SubscriptionPricing__c,
+    SBQQ__SubscriptionTerm__c,
+    SBQQ__Subscription__c,
+    SBQQ__TaxAmount__c,
+    SBQQ__TaxCode__c,
+    SBQQ__TermDiscountSchedule__c,
+    SBQQ__TerminatedDate__c,
+    SBQQ__UnproratedNetPrice__c,
+    SBQQ__UpgradedSubscription__c,
+    Choose_Layout__c,
+    Choose_Theme__c,
+    MB_Billing_Type__c,
+    Product_Category__c,
+    Product_Name__c,
+    Product_Platform_Name__c,
+    Revenue_Category__c,
+    atg_ARR__c,
+    atg_MRR__c,
+    atg_NonRecurringRevenue__c,
+    atg_TCV__c
+FROM 
+    OrderItem
+WHERE 
+    OrderId IN ({order_ids})

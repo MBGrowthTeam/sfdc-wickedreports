@@ -80,7 +80,7 @@ def fetch_object_data(sf, object_name):
     if not fields:
         return pd.DataFrame()
     
-    query = f"SELECT {', '.join(fields)} FROM {object_name} LIMIT 10"
+    query = f"SELECT {', '.join(fields)} FROM {object_name} LIMIT 100"
     try:
         result = sf.query(query)
         records = result['records']
@@ -122,7 +122,7 @@ def main():
                 with st.spinner(f"Fetching data for {selected_object}..."):
                     df = fetch_object_data(sf, selected_object)
                     if not df.empty:
-                        st.write(f"First 10 rows of data for {selected_object}:")
+                        st.write(f"First 100 rows of data for {selected_object}:")
                         st.dataframe(df)
                     else:
                         st.write(f"No data available for {selected_object} or unable to retrieve data.")
