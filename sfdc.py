@@ -28,7 +28,7 @@ PRIMARY_OBJECTS = [
     "Quote",
     "SBQQ__Subscription__c", 
     "WeGather_Project__c", 
-    "WeShare_Site__c" 
+    "WeShare_Site__c"
 ]
 
 # Initialize session state for memory
@@ -90,6 +90,32 @@ def fetch_object_data(sf, object_name):
         st.error(f"Error fetching data for {object_name}: {str(e)}")
         return pd.DataFrame()
 
+# Function to generate SQL for all primary objects
+def generate_combined_sql():
+    combined_sql = ""
+    sf = st.session_state.sf_connection
+
+    if sf:
+        for obj in PRIMARY_OBJECTS:
+            fields = get_object_fields(sf, obj)
+            if fields:
+                # Create SQL for each object with start and end comments
+                sql_query = f"/* Start of {obj} SQL */\nSELECT {', '.join(fields)} FROM {obj};\n/* End of {obj} SQL */\n\n"
+                combined_sql += sql_query
+        
+        # Display SQL
+        st.code(combined_sql, language='sql')
+
+        # Button to export SQL to a file
+        st.download_button(
+            label="Download Combined SQL",
+            data=combined_sql,
+            file_name="combined_primary_objects.sql",
+            mime="text/sql"
+        )
+    else:
+        st.error("Not connected to Salesforce!")
+
 def main():
     st.set_page_config(layout="wide", page_title="SFDC Object Explorer")
     st.title("Salesforce Object Explorer")
@@ -126,6 +152,11 @@ def main():
                         st.dataframe(df)
                     else:
                         st.write(f"No data available for {selected_object} or unable to retrieve data.")
+    
+    # Button to generate and download combined SQL
+    st.markdown("## Export Combined SQL for Primary Objects")
+    if st.button("Generate Combined SQL"):
+        generate_combined_sql()
 
 if __name__ == "__main__":
-    main() 
+    main()

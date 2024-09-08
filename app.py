@@ -312,6 +312,8 @@ def load_sql_query(filename):
         return "".join(query_lines).strip()
 
 def get_brand_id(salesforce, brand_name):
+    if brand_name == "ALL":
+        return None  # Don't filter by brand if "ALL" is selected
     query = f"SELECT Id FROM Brand__c WHERE Name = '{brand_name}'"
     result = salesforce.query(query)
     if result['records']:
@@ -2204,6 +2206,65 @@ def create_bookings_count_id_pie_chart(df):
 
     return fig
 
+# Sales Pipeline
+def fetch_sales_pipeline_data(sf, start_date, end_date, brand=None):
+    """
+    Fetch sales pipeline data from Salesforce within a specified date range,
+    optionally filtered by brand.
+    """
+    start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
+    end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+
+    query = load_sql_query("SalesPipeline.sql").format(start_date=start_date_str, end_date=end_date_str)
+
+    if brand:
+        if isinstance(brand, list):
+            brand_str = ", ".join([f"'{b}'" for b in brand])
+            query += f" AND Brand__c IN ({brand_str})"
+        else:
+            query += f" AND Brand__c = '{brand}'"
+
+    result = sf.query_all(query)
+    df = pd.DataFrame(result["records"]).drop(columns=["attributes"])
+    return df
+
+def process_sales_pipeline_data(df):
+    """
+    Process the sales pipeline data.
+    """
+    df['CreatedDate'] = pd.to_datetime(df['CreatedDate'])
+    df['CloseDate'] = pd.to_datetime(df['CloseDate'])
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+    return df
+
+def create_pipeline_stage_chart(df):
+    """
+    Create a bar chart showing the number of opportunities by stage.
+    """
+    stage_counts = df['StageName'].value_counts().reset_index()
+    stage_counts.columns = ['Stage', 'Count']
+    fig = px.bar(stage_counts, x='Stage', y='Count', title='Number of Opportunities by Stage')
+    return fig
+
+def create_win_loss_chart(df):
+    """
+    Create a pie chart showing the win/loss ratio.
+    """
+    win_loss = df['IsWon'].value_counts().reset_index()
+    win_loss.columns = ['Status', 'Count']
+    win_loss['Status'] = win_loss['Status'].map({True: 'Won', False: 'Lost'})
+    fig = px.pie(win_loss, values='Count', names='Status', title='Win/Loss Ratio')
+    return fig
+
+def create_average_deal_size_chart(df):
+    """
+    Create a bar chart showing the average deal size by stage.
+    """
+    avg_deal_size = df.groupby('StageName')['Amount'].mean().reset_index()
+    fig = px.bar(avg_deal_size, x='StageName', y='Amount', title='Average Deal Size by Stage')
+    fig.update_layout(yaxis_title='Average Amount')
+    return fig
+
 def main():
     """Main function to run the Streamlit application."""
 
@@ -2224,10 +2285,10 @@ def main():
 
             with st.sidebar:
                 st.markdown("### Select Report")
-                report_type = st.radio(
-                    "Choose Report Type", 
-                    ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "Bookings", "SQL Bench")
-                )
+            report_type = st.radio(
+                "Choose Report Type", 
+                ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "Bookings", "Sales Pipeline", "Marketing Campaign Effectiveness", "SQL Bench")
+            )
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
@@ -2639,6 +2700,46 @@ def main():
                                 label="Download Bookings CSV",
                                 data=bookings_csv,
                                 file_name="bookings_export.csv",
+                                mime="text/csv",
+                            )
+
+                    elif report_type == "Sales Pipeline":
+                        dataframe = fetch_sales_pipeline_data(salesforce, start_date, end_date, brand=brand_filter)
+
+                        if dataframe.empty:
+                            st.warning("No sales pipeline data found for the selected date range.")
+                        else:
+                            dataframe = process_sales_pipeline_data(dataframe)
+                            st.subheader("Sales Pipeline Overview")
+
+                            # Display key metrics
+                            total_opportunities = len(dataframe)
+                            total_pipeline_value = dataframe['Amount'].sum()
+                            average_deal_size = dataframe['Amount'].mean()
+
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Total Opportunities", total_opportunities)
+                            with col2:
+                                st.metric("Total Pipeline Value", f"${total_pipeline_value:,.2f}")
+                            with col3:
+                                st.metric("Average Deal Size", f"${average_deal_size:,.2f}")
+
+                            # Display charts
+                            st.plotly_chart(create_pipeline_stage_chart(dataframe), use_container_width=True)
+                            st.plotly_chart(create_win_loss_chart(dataframe), use_container_width=True)
+                            st.plotly_chart(create_average_deal_size_chart(dataframe), use_container_width=True)
+
+                            # Display data table
+                            st.subheader("Sales Pipeline Data Table")
+                            st.dataframe(dataframe)
+
+                            # CSV download button
+                            csv_data = dataframe.to_csv(index=False)
+                            st.download_button(
+                                label="Download Sales Pipeline CSV",
+                                data=csv_data,
+                                file_name="sales_pipeline_export.csv",
                                 mime="text/csv",
                             )
 
