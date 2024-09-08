@@ -2118,7 +2118,7 @@ def create_bookings_count_pie_chart(df):
         values=category_amounts,
         text=labels,
         textposition='inside', 
-        textinfo='label+text',  # Show label and custom text (dollar amount)
+        textinfo='text',  # Show label and custom text (dollar amount)
         hoverinfo='label+percent+value',
         marker=dict(colors=colors, line=dict(color='#ffffff', width=1)),
         showlegend=True
@@ -2126,7 +2126,7 @@ def create_bookings_count_pie_chart(df):
 
     # Update the layout
     fig.update_layout(
-        title=f'Net Bookings by Product Category (Total: {total_amount_str})',
+        title=f'Net Price by Product Category (Total: {total_amount_str})',
         legend_title="Product Category",
         legend=dict(
             orientation="v",
