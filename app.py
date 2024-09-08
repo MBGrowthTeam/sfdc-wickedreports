@@ -45,6 +45,9 @@ import dspy  # (Assumed to be a specialized data science or signal processing li
 # Configuration Parsing
 import toml  # TOML for reading and parsing configuration files
 
+# Color Management
+import colorsys
+
 # Add Logging
 import logging
 
@@ -1920,6 +1923,20 @@ def fetch_and_process_bookings_data(sf, start_date, end_date, brand=None):
 
     return bookings_pivot
 
+def generate_color_palette(n):
+    """
+    Generate a palette of n distinct colors.
+    
+    Args:
+        n (int): Number of colors to generate.
+    
+    Returns:
+        list: List of hex color codes.
+    """
+    HSV_tuples = [(x * 1.0 / n, 0.5, 0.9) for x in range(n)]
+    hex_colors = ['#%02x%02x%02x' % tuple(int(x*255) for x in colorsys.hsv_to_rgb(*hsv)) for hsv in HSV_tuples]
+    return hex_colors
+
 def create_bookings_chart(df):
     """
     Create a line chart to visualize bookings over time.
@@ -1931,8 +1948,15 @@ def create_bookings_chart(df):
         plotly.graph_objects.Figure: The line chart figure.
     """
     df_melted = df.reset_index().melt(id_vars=['OrderMonth'], var_name='Category', value_name='Bookings')
+    
+    # Generate colors based on unique categories
+    categories = df_melted['Category'].unique()
+    colors = generate_color_palette(len(categories))
+    color_map = dict(zip(categories, colors))
+    
     fig = px.line(df_melted, x='OrderMonth', y='Bookings', color='Category',
-                  title='Bookings by Month and Category')
+                  title='Bookings by Month and Category',
+                  color_discrete_map=color_map)
     fig.update_layout(xaxis_title='Month', yaxis_title='Bookings ($)')
     return fig
 
@@ -1953,16 +1977,18 @@ def create_bookings_stacked_bar_chart(df):
     date_col = df_reset.columns[0]  # Assuming the first column is the date/month
     product_cols = df_reset.columns[1:]  # All other columns are product categories
     
+    # Generate colors based on product categories
+    colors = generate_color_palette(len(product_cols))
+    
     # Create the stacked bar chart
     fig = go.Figure()
-    colors = ['#FF7F0E', '#1F77B4', '#2CA02C', '#D62728', '#9467BD', '#8C564B']  # Add more colors if needed
     
     for i, col in enumerate(product_cols):
         fig.add_trace(go.Bar(
             name=col,
             x=df_reset[date_col],
             y=df_reset[col],
-            marker_color=colors[i % len(colors)]
+            marker_color=colors[i]
         ))
     
     # Customize the layout
@@ -1974,7 +2000,7 @@ def create_bookings_stacked_bar_chart(df):
         legend_title='Product Family (groups)',
         xaxis_tickangle=-45,
         yaxis=dict(
-            tickformat='$,.0fK',
+            tickformat='$,.0f',
             tickmode='auto',
             nticks=6,
         ),
@@ -1992,6 +2018,190 @@ def create_bookings_stacked_bar_chart(df):
             yshift=10,
         )
     
+    return fig
+
+def create_bookings_pie_chart(df):
+    """
+    Create a pie chart to visualize the sum of net price by product category.
+
+    Args:
+        df (pd.DataFrame): The processed bookings data.
+
+    Returns:
+        plotly.graph_objects.Figure: The pie chart figure.
+    """
+    # Sum the total bookings for each product category
+    category_totals = df.sum().sort_values(ascending=False)
+    
+    # Calculate percentages
+    total = category_totals.sum()
+    category_percentages = (category_totals / total * 100).round(2)
+    
+    # Generate colors based on the number of categories
+    colors = generate_color_palette(len(category_totals))
+
+    # Create the pie chart
+    fig = go.Figure(data=[go.Pie(
+        labels=category_totals.index,
+        values=category_totals,
+        textposition='outside',
+        textinfo='none',
+        hoverinfo='label+percent+value',
+        marker=dict(colors=colors, line=dict(color='#ffffff', width=1)),
+        showlegend=False
+    )])
+
+    # Update the layout
+    fig.update_layout(
+        title='Net Bookings by Product Category',
+        annotations=[dict(text=f'Total<br>${total/1000:,.0f}K', x=0.5, y=0.5, font_size=20, showarrow=False, font_color='#333333')],
+        legend=dict(
+            title="Product Family (groups)",
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1
+        )
+    )
+
+    # Add a custom legend
+    for i, (category, value, percentage) in enumerate(zip(category_totals.index, category_totals, category_percentages)):
+        fig.add_trace(go.Scatter(
+            x=[None],
+            y=[None],
+            mode='markers',
+            marker=dict(size=10, color=colors[i]),
+            showlegend=True,
+            name=f"{category}<br>${value/1000:,.0f}K ({percentage:.2f}%)"
+        ))
+
+    # Remove axes
+    fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, visible=False)
+
+    return fig
+
+def create_bookings_count_pie_chart(df):
+    """
+    Create a pie chart to visualize the count of IDs by product category,
+    showing the dollar amount for each slice and abbreviating the total.
+
+    Args:
+        df (pd.DataFrame): The processed bookings data (can be multi-index).
+
+    Returns:
+        plotly.graph_objects.Figure: The pie chart figure.
+    """
+    # For multi-index DataFrames, the categories are the column names
+    category_amounts = df.sum()
+    
+    # Calculate the total dollar amount
+    total_amount = category_amounts.sum()
+
+    # Abbreviate total amount (MM for millions)
+    if total_amount >= 1_000_000:
+        total_amount_str = f"${total_amount / 1_000_000:.1f}MM"
+    else:
+        total_amount_str = f"${total_amount:,.0f}"
+
+    # Generate colors based on the number of categories
+    colors = generate_color_palette(len(category_amounts))
+
+    # Create labels with dollar amount
+    labels = [f"{cat}\n${amount:,.0f}" 
+              for cat, amount in zip(category_amounts.index, category_amounts)]
+
+    # Create the pie chart
+    fig = go.Figure(data=[go.Pie(
+        labels=category_amounts.index,
+        values=category_amounts,
+        text=labels,
+        textposition='inside', 
+        textinfo='label+text',  # Show label and custom text (dollar amount)
+        hoverinfo='label+percent+value',
+        marker=dict(colors=colors, line=dict(color='#ffffff', width=1)),
+        showlegend=True
+    )])
+
+    # Update the layout
+    fig.update_layout(
+        title=f'Net Bookings by Product Category (Total: {total_amount_str})',
+        legend_title="Product Category",
+        legend=dict(
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1
+        )
+    )
+
+    # Remove axes
+    fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, visible=False)
+
+    # Improve text readability inside the slices 
+    fig.update_traces(textfont_size=12, textfont_color='black', insidetextorientation='radial')
+
+    return fig
+
+def create_bookings_count_id_pie_chart(df):
+    """
+    Create a pie chart to visualize the count of bookings by product category.
+
+    Args:
+        df (pd.DataFrame): The processed bookings data with MultiIndex.
+
+    Returns:
+        plotly.graph_objects.Figure: The pie chart figure.
+    """
+    # Sum the bookings for each product category across all months
+    category_counts = df.sum().sort_values(ascending=False)
+    
+    # Calculate percentages
+    total = category_counts.sum()
+    category_percentages = (category_counts / total * 100).round(2)
+    
+    # Generate colors based on the number of categories
+    colors = generate_color_palette(len(category_counts))
+
+    # Create labels with count and percentage
+    labels = [f"{cat}<br>${count:,.0f} ({percentage:.2f}%)" 
+              for cat, count, percentage in zip(category_counts.index, category_counts, category_percentages)]
+
+    # Create the pie chart
+    fig = go.Figure(data=[go.Pie(
+        labels=category_counts.index,
+        values=category_counts,
+        text=labels,
+        textposition='inside',
+        textinfo='label+percent',
+        hoverinfo='label+percent+value',
+        marker=dict(colors=colors, line=dict(color='#ffffff', width=1)),
+        showlegend=True
+    )])
+
+    # Update the layout
+    fig.update_layout(
+        title='Net Bookings by Product Category',
+        legend_title="Product Category",
+        legend=dict(
+            orientation="v",
+            yanchor="middle",
+            y=0.5,
+            xanchor="left",
+            x=1
+        )
+    )
+
+    # Remove axes
+    fig.update_xaxes(showgrid=False, zeroline=False, visible=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, visible=False)
+
+    # Improve text readability inside the slices - Dark color for text
+    fig.update_traces(textfont_size=12, textfont_color='black', insidetextorientation='radial')
+
     return fig
 
 def main():
@@ -2403,6 +2613,15 @@ def main():
                             # Display total bookings
                             total_bookings = bookings_df.sum().sum()
                             st.metric("Total Bookings", f"${total_bookings:,.2f}")
+
+                            # Display count of IDs by Product Category pie chart
+                            count_pie_chart = create_bookings_count_pie_chart(bookings_df)
+                            if count_pie_chart:
+                                st.plotly_chart(count_pie_chart, use_container_width=True)
+
+                            # Display count of bookings by Product Category pie chart
+                            count_pie_chart = create_bookings_count_id_pie_chart(bookings_df)
+                            st.plotly_chart(count_pie_chart, use_container_width=True)
 
                             # Display stacked bar chart
                             st.plotly_chart(create_bookings_stacked_bar_chart(bookings_df), use_container_width=True)
