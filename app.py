@@ -1863,6 +1863,137 @@ def create_cltv_by_product_category_chart(df):
     )
     return fig
 
+def fetch_and_process_bookings_data(sf, start_date, end_date, brand=None):
+    """
+    Fetch and process bookings data from Salesforce within a specified date range,
+    optionally filtered by brand.
+
+    Args:
+        sf: Salesforce connection object.
+        start_date: Start date for the data range.
+        end_date: End date for the data range.
+        brand: The brand to filter by (optional).
+
+    Returns:
+        pd.DataFrame: A Pandas DataFrame containing the processed bookings data.
+    """
+    start_date_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
+    end_date_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
+
+    # Fetch Order data
+    order_query = load_sql_query("Order.sql").format(start_date=start_date_str, end_date=end_date_str)
+    if brand:
+        if isinstance(brand, list):
+            brand_str = ", ".join([f"'{b}'" for b in brand])
+            order_query += f" AND Brand__c IN ({brand_str})"
+        else:
+            order_query += f" AND Brand__c = '{brand}'"
+    order_result = sf.query_all(order_query)
+    orders_df = pd.DataFrame(order_result["records"]).drop(columns=["attributes"])
+
+    # Fetch OrderItem data
+    orderitem_query = f"SELECT Id, OrderId, Product2Id, TotalPrice FROM OrderItem WHERE OrderId IN (SELECT Id FROM Order WHERE CreatedDate >= {start_date_str} AND CreatedDate <= {end_date_str})"
+    orderitem_result = sf.query_all(orderitem_query)
+    orderitems_df = pd.DataFrame(orderitem_result["records"]).drop(columns=["attributes"])
+
+    # Fetch Product data
+    product_query = "SELECT Id, Product_Category__c FROM Product2"
+    product_result = sf.query_all(product_query)
+    products_df = pd.DataFrame(product_result["records"]).drop(columns=["attributes"])
+
+    # Merge the DataFrames
+    merged_df = orderitems_df.merge(products_df, left_on='Product2Id', right_on='Id', how='left')
+    merged_df = merged_df.merge(orders_df, left_on='OrderId', right_on='Id', how='left')
+
+    # Process the data
+    merged_df['CreatedDate'] = pd.to_datetime(merged_df['CreatedDate'])
+    merged_df['OrderMonth'] = merged_df['CreatedDate'].dt.strftime('%Y-%m')
+
+    # Group the orders by month and product category and sum the total price
+    bookings_by_month = merged_df.groupby(['OrderMonth', 'Product_Category__c'])['TotalPrice'].sum().reset_index()
+
+    # Create a pivot table to show bookings by month and product category
+    bookings_pivot = bookings_by_month.pivot(index='OrderMonth', columns='Product_Category__c', values='TotalPrice').fillna(0)
+
+    # Rename the columns for clarity
+    bookings_pivot = bookings_pivot.rename(columns={'Services': 'Services Bookings', 'Software': 'Software Bookings'})
+
+    return bookings_pivot
+
+def create_bookings_chart(df):
+    """
+    Create a line chart to visualize bookings over time.
+
+    Args:
+        df (pd.DataFrame): The processed bookings data.
+
+    Returns:
+        plotly.graph_objects.Figure: The line chart figure.
+    """
+    df_melted = df.reset_index().melt(id_vars=['OrderMonth'], var_name='Category', value_name='Bookings')
+    fig = px.line(df_melted, x='OrderMonth', y='Bookings', color='Category',
+                  title='Bookings by Month and Category')
+    fig.update_layout(xaxis_title='Month', yaxis_title='Bookings ($)')
+    return fig
+
+def create_bookings_stacked_bar_chart(df):
+    """
+    Create a stacked bar chart to visualize bookings over time by product family.
+
+    Args:
+        df (pd.DataFrame): The processed bookings data.
+
+    Returns:
+        plotly.graph_objects.Figure: The stacked bar chart figure.
+    """
+    # Reset index to make 'OrderMonth' a column
+    df_reset = df.reset_index()
+    
+    # Identify the column names dynamically
+    date_col = df_reset.columns[0]  # Assuming the first column is the date/month
+    product_cols = df_reset.columns[1:]  # All other columns are product categories
+    
+    # Create the stacked bar chart
+    fig = go.Figure()
+    colors = ['#FF7F0E', '#1F77B4', '#2CA02C', '#D62728', '#9467BD', '#8C564B']  # Add more colors if needed
+    
+    for i, col in enumerate(product_cols):
+        fig.add_trace(go.Bar(
+            name=col,
+            x=df_reset[date_col],
+            y=df_reset[col],
+            marker_color=colors[i % len(colors)]
+        ))
+    
+    # Customize the layout
+    fig.update_layout(
+        title='Bookings by Month and Group',
+        xaxis_title='Month',
+        yaxis_title='Sum of Net Price',
+        barmode='stack',
+        legend_title='Product Family (groups)',
+        xaxis_tickangle=-45,
+        yaxis=dict(
+            tickformat='$,.0fK',
+            tickmode='auto',
+            nticks=6,
+        ),
+        plot_bgcolor='white',
+    )
+    
+    # Add total labels on top of each stacked bar
+    for i in range(len(df_reset)):
+        total = df_reset[product_cols].iloc[i].sum()
+        fig.add_annotation(
+            x=df_reset[date_col].iloc[i],
+            y=total,
+            text=f"${total/1000:.0f}K",
+            showarrow=False,
+            yshift=10,
+        )
+    
+    return fig
+
 def main():
     """Main function to run the Streamlit application."""
 
@@ -1881,11 +2012,12 @@ def main():
             available_brands = brands_by_vertical[selected_vertical]
             selected_brand = st.selectbox("Select Brand", ["ALL"] + available_brands)
 
-            st.markdown("### Select Report")
-            report_type = st.radio(
-                "Choose Report Type", 
-                ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "SQL Bench")
-            )
+            with st.sidebar:
+                st.markdown("### Select Report")
+                report_type = st.radio(
+                    "Choose Report Type", 
+                    ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "Bookings", "SQL Bench")
+                )
 
         # Main dashboard title
         st.title("Salesforce Data Dashboard")
@@ -2258,7 +2390,38 @@ def main():
                                     mime="text/csv",
                                 )
                             else:
-                                st.warning("Unable to calculate CLTV due to insufficient data.") 
+                                st.warning("Unable to calculate CLTV due to insufficient data.")
+
+                    elif report_type == "Bookings":
+                        bookings_df = fetch_and_process_bookings_data(salesforce, start_date, end_date, brand=brand_filter)
+
+                        if bookings_df.empty:
+                            st.warning("No bookings data found for the selected date range.")
+                        else:
+                            st.subheader("Bookings Dashboard")
+
+                            # Display total bookings
+                            total_bookings = bookings_df.sum().sum()
+                            st.metric("Total Bookings", f"${total_bookings:,.2f}")
+
+                            # Display stacked bar chart
+                            st.plotly_chart(create_bookings_stacked_bar_chart(bookings_df), use_container_width=True)
+
+                            # Display line chart
+                            st.plotly_chart(create_bookings_chart(bookings_df), use_container_width=True)
+
+                            # Display data table
+                            st.subheader("Bookings Data Table")
+                            st.dataframe(bookings_df)
+
+                            # CSV download button
+                            bookings_csv = bookings_df.to_csv()
+                            st.download_button(
+                                label="Download Bookings CSV",
+                                data=bookings_csv,
+                                file_name="bookings_export.csv",
+                                mime="text/csv",
+                            )
 
 if __name__ == "__main__":
     main()

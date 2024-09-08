@@ -64,6 +64,7 @@ venv.bak/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/config.toml
 
 # IDEs and editors
 .idea/
