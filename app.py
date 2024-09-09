@@ -2287,7 +2287,7 @@ def main():
                 st.markdown("### Select Report")
             report_type = st.radio(
                 "Choose Report Type", 
-                ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "Bookings", "Sales Pipeline", "Marketing Campaign Effectiveness", "SQL Bench")
+                ("Orders", "MQLs", "Leads", "Open Opportunities", "Customer Lifetime Value", "Bookings", "Sales Pipeline", "SQL Bench")
             )
 
         # Main dashboard title
